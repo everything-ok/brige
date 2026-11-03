@@ -1,0 +1,2424 @@
+# 🛡️ 极低风控 AI 模型桥接器（真人行为模拟 + 智能限流）
+
+---
+
+## 架构设计
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                        配置文件 (sites.yaml)                      │
+│   定义网站列表、选择器、行为参数，新增网站只需添加配置              │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+┌───────────────────────────────▼─────────────────────────────────┐
+│                        浏览器管理层                               │
+│  • 持久化 Profile（保留登录态、Cookie、历史）                      │
+│  • 真实指纹（来自真实浏览器的 Canvas/WebGL/字体等）                │
+│  • 多账号轮换 + 冷却时间                                          │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+┌───────────────────────────────▼─────────────────────────────────┐
+│                        行为模拟引擎                               │
+│  • 贝塞尔曲线鼠标移动                                             │
+│  • 高斯分布打字速度（30-150ms/字符）                              │
+│  • 随机停顿、滚动、窗口切换                                       │
+│  • 阅读时间模拟（根据内容长度）                                   │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+┌───────────────────────────────▼─────────────────────────────────┐
+│                        安全验证拦截器                             │
+│  • 检测 Cloudflare/hCaptcha/reCAPTCHA                           │
+│  • 自动暂停 + 声音/桌面通知                                       │
+│  • 等待人工完成后自动继续                                         │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+┌───────────────────────────────▼─────────────────────────────────┐
+│                        智能限流器                                 │
+│  • 每分钟/小时/天请求限制                                         │
+│  • 动态冷却（检测到异常自动延长间隔）                              │
+│  • 多站点负载均衡                                                 │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+┌───────────────────────────────▼─────────────────────────────────┐
+│                     OpenAI 兼容 API 层                           │
+│  • /v1/chat/completions                                         │
+│  • 流式/非流式响应                                                │
+│  • 自动重试 + 故障转移                                            │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 项目结构
+
+```
+ai-bridge/
+├── main.py                 # FastAPI 主服务
+├── config.py               # 配置加载
+├── sites.yaml              # 🔑 网站配置（核心：只需填网址）
+├── browser/
+│   ├── __init__.py
+│   ├── manager.py          # 浏览器生命周期管理
+│   ├── profile.py          # 持久化 Profile 管理
+│   ├── fingerprint.py      # 真实指纹生成
+│   └── stealth.py          # 反检测注入
+├── behavior/
+│   ├── __init__.py
+│   ├── mouse.py            # 鼠标轨迹模拟
+│   ├── keyboard.py         # 打字行为模拟
+│   ├── human.py            # 综合人类行为
+│   └── timing.py           # 时间分布
+├── security/
+│   ├── __init__.py
+│   ├── detector.py         # 验证检测
+│   ├── notifier.py         # 人工通知
+│   └── waiter.py           # 等待人工处理
+├── limiter/
+│   ├── __init__.py
+│   ├── rate.py             # 速率限制
+│   ├── cooldown.py         # 冷却管理
+│   └── balancer.py         # 负载均衡
+├── providers/
+│   ├── __init__.py
+│   ├── base.py             # 基础 Provider
+│   ├── generic.py          # 通用网站适配器（配置驱动）
+│   └── validator.py        # 桥接验证器
+├── profiles/               # 浏览器 Profile 持久化目录
+├── logs/                   # 日志目录
+└── requirements.txt
+```
+
+---
+
+## Step 1：安装依赖
+
+```bash
+mkdir ai-bridge && cd ai-bridge
+
+cat > requirements.txt << 'EOF'
+# 核心
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+playwright==1.45.0
+pyyaml==6.0.1
+pydantic==2.7.4
+python-dotenv==1.0.1
+
+# 行为模拟
+numpy==1.26.4
+scipy==1.14.0
+bezier==2023.7.28
+
+# 通知
+plyer==2.1.0
+desktop-notifier==5.0.0
+
+# 工具
+rich==13.7.1
+httpx==0.27.0
+aiofiles==24.1.0
+python-dateutil==2.9.0
+EOF
+
+pip install -r requirements.txt
+playwright install chromium
+playwright install-deps
+```
+
+---
+
+## Step 2：网站配置文件（核心：只需填网址）
+
+```yaml
+# sites.yaml
+# 🔑 只需填入网址，系统自动适配
+
+global:
+  # 全局限流设置（真人级别）
+  rate_limit:
+    requests_per_minute: 2      # 每分钟最多2次（真人速度）
+    requests_per_hour: 30       # 每小时最多30次
+    requests_per_day: 200       # 每天最多200次
+    min_interval_seconds: 25    # 两次请求最小间隔25秒
+    max_interval_seconds: 120   # 随机延迟最大120秒
+
+  # 人类行为参数
+  behavior:
+    typing_speed_min_ms: 40     # 最慢打字速度
+    typing_speed_max_ms: 180    # 最快打字速度
+    typing_mistake_rate: 0.02   # 打字错误率（2%）
+    mouse_speed_min: 200        # 鼠标移动最小时间ms
+    mouse_speed_max: 800        # 鼠标移动最大时间ms
+    scroll_probability: 0.3     # 随机滚动概率
+    pause_probability: 0.15     # 随机暂停概率
+    pause_duration_min: 1.0     # 暂停最小秒数
+    pause_duration_max: 5.0     # 暂停最大秒数
+
+  # 冷却策略（检测到异常时）
+  cooldown:
+    initial_seconds: 300        # 初始冷却5分钟
+    max_seconds: 3600           # 最大冷却1小时
+    multiplier: 2.0             # 每次异常翻倍
+    reset_after_success: 3      # 连续成功3次后重置
+
+  # 安全验证
+  security:
+    auto_pause: true            # 检测到验证自动暂停
+    notification_sound: true    # 声音通知
+    desktop_notification: true  # 桌面通知
+    max_wait_minutes: 30        # 最多等待30分钟
+    screenshot_on_captcha: true # 验证时截图
+
+
+# ═══════════════════════════════════════════════════════════════
+# 网站列表（只需填入 URL 即可，系统自动识别）
+# ═══════════════════════════════════════════════════════════════
+
+sites:
+  # ─── 示例：Poe.com ─────────────────────────────────────────
+  - name: poe
+    enabled: true
+    url: "https://poe.com"
+    priority: 1                   # 优先级（数字越小越优先）
+
+    # 可选：自定义选择器（留空则自动检测）
+    selectors:
+      input: 'textarea[class*="GrowingTextArea"]'
+      send_button: 'button[class*="SendButton"]'
+      response: '[class*="Message_botMessageBubble"]'
+      stop_button: '[class*="StopButton"]'
+      model_indicator: '[class*="BotHeader"] span, [class*="ModelName"]'
+
+    # 可选：该站点独立限流（覆盖全局）
+    rate_limit:
+      requests_per_hour: 40
+
+    # 可用模型映射
+    models:
+      gpt-4o: "GPT-4o"
+      gpt-4o-mini: "GPT-4o-Mini"
+      claude-3-5-sonnet: "Claude-3.5-Sonnet"
+      claude-3-opus: "Claude-3-Opus"
+      gemini-1.5-pro: "Gemini-1.5-Pro"
+      llama-3-70b: "Llama-3-70b"
+
+
+  # ─── 示例：Perplexity ──────────────────────────────────────
+  - name: perplexity
+    enabled: true
+    url: "https://www.perplexity.ai"
+    priority: 2
+
+    selectors:
+      input: 'textarea[placeholder*="Ask"]'
+      response: '[class*="prose"], [data-testid="answer"]'
+      model_indicator: '[class*="ModelSelector"] span'
+
+    models:
+      pplx-online: "default"
+      claude-3-5-sonnet: "claude-3.5-sonnet"
+      gpt-4o: "gpt-4o"
+
+
+  # ─── 示例：You.com ─────────────────────────────────────────
+  - name: you
+    enabled: true
+    url: "https://you.com"
+    priority: 3
+
+    selectors:
+      input: 'textarea[name="query"], input[type="text"]'
+      response: '[data-testid="youchat-answer"]'
+
+    models:
+      you-default: "default"
+
+
+  # ─── 示例：自定义网站（只需填 URL）────────────────────────
+  # - name: my_custom_site
+  #   enabled: true
+  #   url: "https://example-ai.com/chat"
+  #   priority: 10
+  #   # 不填 selectors，系统会尝试自动检测常见选择器
+
+
+# ═══════════════════════════════════════════════════════════════
+# 验证检测配置（检测到这些元素时暂停等待人工）
+# ═══════════════════════════════════════════════════════════════
+
+captcha_indicators:
+  # Cloudflare
+  - selector: '#challenge-running, #challenge-stage'
+    name: "Cloudflare Challenge"
+  - selector: 'iframe[src*="challenges.cloudflare.com"]'
+    name: "Cloudflare Turnstile"
+
+  # hCaptcha
+  - selector: 'iframe[src*="hcaptcha.com"]'
+    name: "hCaptcha"
+  - selector: '[class*="hcaptcha"]'
+    name: "hCaptcha Widget"
+
+  # reCAPTCHA
+  - selector: 'iframe[src*="recaptcha"]'
+    name: "reCAPTCHA"
+  - selector: '.g-recaptcha'
+    name: "reCAPTCHA Widget"
+
+  # 通用
+  - selector: '[class*="captcha" i], [id*="captcha" i]'
+    name: "Generic Captcha"
+  - selector: '[class*="challenge" i], [id*="challenge" i]'
+    name: "Generic Challenge"
+  - selector: 'text="Verify you are human"'
+    name: "Human Verification Text"
+  - selector: 'text="Please complete the security check"'
+    name: "Security Check Text"
+```
+
+---
+
+## Step 3：配置加载模块
+
+```python
+# config.py
+import os
+import yaml
+from pathlib import Path
+from typing import List, Dict, Any, Optional
+from dataclasses import dataclass, field
+from dotenv import load_dotenv
+
+load_dotenv()
+
+BASE_DIR     = Path(__file__).parent
+PROFILES_DIR = BASE_DIR / "profiles"
+LOGS_DIR     = BASE_DIR / "logs"
+
+PROFILES_DIR.mkdir(exist_ok=True)
+LOGS_DIR.mkdir(exist_ok=True)
+
+
+@dataclass
+class RateLimitConfig:
+    requests_per_minute: int = 2
+    requests_per_hour: int = 30
+    requests_per_day: int = 200
+    min_interval_seconds: int = 25
+    max_interval_seconds: int = 120
+
+
+@dataclass
+class BehaviorConfig:
+    typing_speed_min_ms: int = 40
+    typing_speed_max_ms: int = 180
+    typing_mistake_rate: float = 0.02
+    mouse_speed_min: int = 200
+    mouse_speed_max: int = 800
+    scroll_probability: float = 0.3
+    pause_probability: float = 0.15
+    pause_duration_min: float = 1.0
+    pause_duration_max: float = 5.0
+
+
+@dataclass
+class CooldownConfig:
+    initial_seconds: int = 300
+    max_seconds: int = 3600
+    multiplier: float = 2.0
+    reset_after_success: int = 3
+
+
+@dataclass
+class SecurityConfig:
+    auto_pause: bool = True
+    notification_sound: bool = True
+    desktop_notification: bool = True
+    max_wait_minutes: int = 30
+    screenshot_on_captcha: bool = True
+
+
+@dataclass
+class SiteConfig:
+    name: str
+    url: str
+    enabled: bool = True
+    priority: int = 10
+    selectors: Dict[str, str] = field(default_factory=dict)
+    models: Dict[str, str] = field(default_factory=dict)
+    rate_limit: Optional[RateLimitConfig] = None
+
+
+@dataclass
+class CaptchaIndicator:
+    selector: str
+    name: str
+
+
+class Config:
+    HOST = os.getenv("HOST", "0.0.0.0")
+    PORT = int(os.getenv("PORT", 8080))
+    API_KEY = os.getenv("API_KEY", "bridge-key-change-me")
+    HEADLESS = os.getenv("HEADLESS", "false").lower() == "true"  # 默认非无头（方便人工验证）
+    DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+
+    def __init__(self):
+        self.global_rate_limit = RateLimitConfig()
+        self.behavior = BehaviorConfig()
+        self.cooldown = CooldownConfig()
+        self.security = SecurityConfig()
+        self.sites: List[SiteConfig] = []
+        self.captcha_indicators: List[CaptchaIndicator] = []
+        self._load_yaml()
+
+    def _load_yaml(self):
+        yaml_path = BASE_DIR / "sites.yaml"
+        if not yaml_path.exists():
+            return
+
+        with open(yaml_path, "r", encoding="utf-8") as f:
+            data = yaml.safe_load(f) or {}
+
+        # 加载全局配置
+        g = data.get("global", {})
+
+        if "rate_limit" in g:
+            self.global_rate_limit = RateLimitConfig(**g["rate_limit"])
+        if "behavior" in g:
+            self.behavior = BehaviorConfig(**g["behavior"])
+        if "cooldown" in g:
+            self.cooldown = CooldownConfig(**g["cooldown"])
+        if "security" in g:
+            self.security = SecurityConfig(**g["security"])
+
+        # 加载站点
+        for site_data in data.get("sites", []):
+            rate_limit = None
+            if "rate_limit" in site_data:
+                rate_limit = RateLimitConfig(**site_data.pop("rate_limit"))
+
+            site = SiteConfig(
+                name=site_data.get("name", "unknown"),
+                url=site_data.get("url", ""),
+                enabled=site_data.get("enabled", True),
+                priority=site_data.get("priority", 10),
+                selectors=site_data.get("selectors", {}),
+                models=site_data.get("models", {}),
+                rate_limit=rate_limit,
+            )
+            if site.enabled and site.url:
+                self.sites.append(site)
+
+        # 按优先级排序
+        self.sites.sort(key=lambda x: x.priority)
+
+        # 加载验证指示器
+        for ci in data.get("captcha_indicators", []):
+            self.captcha_indicators.append(
+                CaptchaIndicator(selector=ci["selector"], name=ci["name"])
+            )
+
+    def get_site(self, name: str) -> Optional[SiteConfig]:
+        for site in self.sites:
+            if site.name == name:
+                return site
+        return None
+
+    def get_enabled_sites(self) -> List[SiteConfig]:
+        return [s for s in self.sites if s.enabled]
+
+
+config = Config()
+```
+
+---
+
+## Step 4：人类行为模拟引擎
+
+```python
+# behavior/timing.py
+import random
+import numpy as np
+from typing import Tuple
+
+
+def gaussian_delay(mean: float, std: float, min_val: float = 0.01) -> float:
+    """高斯分布延迟"""
+    delay = random.gauss(mean, std)
+    return max(min_val, delay)
+
+
+def exponential_delay(scale: float) -> float:
+    """指数分布延迟（模拟思考时间）"""
+    return random.expovariate(1.0 / scale)
+
+
+def human_reading_time(text_length: int, wpm: int = 200) -> float:
+    """根据文本长度计算人类阅读时间"""
+    # 平均每分钟200词，每词约5字符
+    words = text_length / 5
+    base_time = (words / wpm) * 60
+    # 加入随机变化
+    return base_time * random.uniform(0.8, 1.3)
+
+
+def typing_delay(char: str, config) -> float:
+    """单字符打字延迟（模拟真人打字节奏）"""
+    base_min = config.behavior.typing_speed_min_ms / 1000
+    base_max = config.behavior.typing_speed_max_ms / 1000
+
+    # 基础延迟
+    delay = random.uniform(base_min, base_max)
+
+    # 特殊字符更慢
+    if char in '.,!?;:':
+        delay *= random.uniform(1.5, 2.5)
+    elif char == ' ':
+        delay *= random.uniform(0.8, 1.2)
+    elif char == '\n':
+        delay *= random.uniform(2.0, 4.0)
+    elif char.isupper():
+        delay *= random.uniform(1.1, 1.4)
+
+    # 偶尔的长停顿（思考）
+    if random.random() < 0.03:
+        delay += random.uniform(0.3, 1.5)
+
+    return delay
+
+
+def should_make_typo(config) -> bool:
+    """是否产生打字错误"""
+    return random.random() < config.behavior.typing_mistake_rate
+
+
+def get_typo_char(char: str) -> str:
+    """生成打字错误字符"""
+    keyboard_neighbors = {
+        'a': 'qwsz', 'b': 'vghn', 'c': 'xdfv', 'd': 'erfcxs',
+        'e': 'wrsdf', 'f': 'rtgvcd', 'g': 'tyhbvf', 'h': 'yujnbg',
+        'i': 'uojkl', 'j': 'uikmnh', 'k': 'ioljm', 'l': 'opk',
+        'm': 'njk', 'n': 'bhjm', 'o': 'iplk', 'p': 'ol',
+        'q': 'wa', 'r': 'etdf', 's': 'wedxza', 't': 'ryfg',
+        'u': 'yihj', 'v': 'cfgb', 'w': 'qeas', 'x': 'zsdc',
+        'y': 'tugh', 'z': 'asx',
+    }
+    lower = char.lower()
+    if lower in keyboard_neighbors:
+        typo = random.choice(keyboard_neighbors[lower])
+        return typo.upper() if char.isupper() else typo
+    return char
+```
+
+```python
+# behavior/mouse.py
+import asyncio
+import random
+import math
+from typing import List, Tuple
+import numpy as np
+
+
+def bezier_curve(
+    start: Tuple[float, float],
+    end: Tuple[float, float],
+    num_points: int = 50,
+) -> List[Tuple[float, float]]:
+    """生成贝塞尔曲线鼠标轨迹"""
+    # 生成 1-3 个随机控制点
+    num_control = random.randint(1, 3)
+    control_points = [start]
+
+    for _ in range(num_control):
+        # 控制点在起点和终点之间随机偏移
+        cx = start[0] + (end[0] - start[0]) * random.uniform(0.2, 0.8)
+        cy = start[1] + (end[1] - start[1]) * random.uniform(0.2, 0.8)
+        # 加入随机偏移
+        offset_x = random.uniform(-100, 100)
+        offset_y = random.uniform(-100, 100)
+        control_points.append((cx + offset_x, cy + offset_y))
+
+    control_points.append(end)
+
+    # 计算贝塞尔曲线点
+    points = []
+    n = len(control_points) - 1
+
+    for i in range(num_points):
+        t = i / (num_points - 1)
+        x, y = 0.0, 0.0
+
+        for j, (px, py) in enumerate(control_points):
+            # 伯恩斯坦多项式
+            binom = math.comb(n, j)
+            weight = binom * (t ** j) * ((1 - t) ** (n - j))
+            x += weight * px
+            y += weight * py
+
+        points.append((x, y))
+
+    return points
+
+
+def add_noise_to_path(
+    points: List[Tuple[float, float]],
+    noise_level: float = 2.0,
+) -> List[Tuple[float, float]]:
+    """给轨迹添加微小抖动（模拟手抖）"""
+    noisy = []
+    for x, y in points:
+        nx = x + random.gauss(0, noise_level)
+        ny = y + random.gauss(0, noise_level)
+        noisy.append((nx, ny))
+    return noisy
+
+
+async def human_mouse_move(page, target_x: float, target_y: float, config):
+    """人类风格的鼠标移动"""
+    try:
+        # 获取当前鼠标位置（近似）
+        viewport = page.viewport_size or {"width": 1280, "height": 800}
+        current_x = random.uniform(0, viewport["width"])
+        current_y = random.uniform(0, viewport["height"])
+
+        # 生成轨迹
+        num_points = random.randint(20, 50)
+        path = bezier_curve((current_x, current_y), (target_x, target_y), num_points)
+        path = add_noise_to_path(path)
+
+        # 计算移动时间
+        distance = math.sqrt((target_x - current_x)**2 + (target_y - current_y)**2)
+        base_time = config.behavior.mouse_speed_min + (
+            config.behavior.mouse_speed_max - config.behavior.mouse_speed_min
+        ) * (distance / 1000)
+
+        # 沿轨迹移动
+        step_delay = base_time / len(path) / 1000
+
+        for x, y in path:
+            await page.mouse.move(x, y)
+            # 变速移动
+            await asyncio.sleep(step_delay * random.uniform(0.5, 1.5))
+
+    except Exception:
+        # fallback: 直接移动
+        await page.mouse.move(target_x, target_y)
+```
+
+```python
+# behavior/keyboard.py
+import asyncio
+import random
+from typing import Optional
+from .timing import typing_delay, should_make_typo, get_typo_char
+
+
+async def human_type(
+    page,
+    selector: str,
+    text: str,
+    config,
+    clear_first: bool = True,
+):
+    """人类风格打字"""
+    element = await page.wait_for_selector(selector, timeout=15000)
+
+    # 点击输入框
+    await element.click()
+    await asyncio.sleep(random.uniform(0.2, 0.5))
+
+    # 清空
+    if clear_first:
+        await element.fill("")
+        await asyncio.sleep(random.uniform(0.1, 0.3))
+
+    # 逐字符输入
+    i = 0
+    while i < len(text):
+        char = text[i]
+
+        # 模拟打字错误
+        if should_make_typo(config) and char.isalpha():
+            # 打错字
+            wrong_char = get_typo_char(char)
+            await element.type(wrong_char, delay=0)
+            await asyncio.sleep(typing_delay(wrong_char, config))
+
+            # 发现错误（短暂停顿）
+            await asyncio.sleep(random.uniform(0.1, 0.4))
+
+            # 删除错误字符
+            await page.keyboard.press("Backspace")
+            await asyncio.sleep(random.uniform(0.05, 0.15))
+
+        # 正确输入
+        await element.type(char, delay=0)
+        await asyncio.sleep(typing_delay(char, config))
+
+        # 随机暂停（思考）
+        if random.random() < config.behavior.pause_probability:
+            await asyncio.sleep(
+                random.uniform(
+                    config.behavior.pause_duration_min,
+                    config.behavior.pause_duration_max
+                )
+            )
+
+        i += 1
+
+
+async def human_type_fast(
+    page,
+    selector: str,
+    text: str,
+    config,
+):
+    """快速但仍像人类的输入（用于长文本）"""
+    element = await page.wait_for_selector(selector, timeout=15000)
+    await element.click()
+    await element.fill("")
+    await asyncio.sleep(random.uniform(0.2, 0.5))
+
+    # 分块输入
+    chunk_size = random.randint(30, 80)
+    for i in range(0, len(text), chunk_size):
+        chunk = text[i:i + chunk_size]
+        await element.type(chunk, delay=random.randint(10, 30))
+        # 每块之间短暂停顿
+        await asyncio.sleep(random.uniform(0.1, 0.4))
+```
+
+```python
+# behavior/human.py
+import asyncio
+import random
+from .mouse import human_mouse_move
+from .keyboard import human_type, human_type_fast
+from .timing import human_reading_time, gaussian_delay
+
+
+class HumanBehavior:
+    """人类行为模拟器"""
+
+    def __init__(self, page, config):
+        self.page = page
+        self.config = config
+
+    async def random_scroll(self):
+        """随机滚动页面"""
+        if random.random() > self.config.behavior.scroll_probability:
+            return
+
+        direction = random.choice([-1, 1])
+        amount = random.randint(100, 400) * direction
+        await self.page.mouse.wheel(0, amount)
+        await asyncio.sleep(random.uniform(0.3, 1.0))
+
+    async def random_pause(self):
+        """随机暂停（模拟思考/阅读）"""
+        if random.random() > self.config.behavior.pause_probability:
+            return
+
+        duration = random.uniform(
+            self.config.behavior.pause_duration_min,
+            self.config.behavior.pause_duration_max,
+        )
+        await asyncio.sleep(duration)
+
+    async def read_response(self, text_length: int):
+        """模拟阅读响应内容"""
+        read_time = human_reading_time(text_length)
+        # 不完全等待，但有一定阅读时间
+        await asyncio.sleep(min(read_time, 5.0))
+
+    async def move_to_element(self, selector: str):
+        """移动鼠标到元素"""
+        try:
+            element = await self.page.wait_for_selector(selector, timeout=5000)
+            box = await element.bounding_box()
+            if box:
+                # 随机点击元素内某处（不是正中心）
+                x = box["x"] + box["width"] * random.uniform(0.2, 0.8)
+                y = box["y"] + box["height"] * random.uniform(0.2, 0.8)
+                await human_mouse_move(self.page, x, y, self.config)
+        except Exception:
+            pass
+
+    async def click_element(self, selector: str):
+        """人类风格点击元素"""
+        await self.move_to_element(selector)
+        await asyncio.sleep(random.uniform(0.05, 0.2))
+        element = await self.page.query_selector(selector)
+        if element:
+            await element.click()
+        await asyncio.sleep(random.uniform(0.1, 0.3))
+
+    async def type_text(self, selector: str, text: str, fast: bool = False):
+        """人类风格输入文本"""
+        await self.move_to_element(selector)
+        await asyncio.sleep(random.uniform(0.1, 0.3))
+
+        if fast or len(text) > 500:
+            await human_type_fast(self.page, selector, text, self.config)
+        else:
+            await human_type(self.page, selector, text, self.config)
+
+    async def before_action(self):
+        """执行动作前的随机行为"""
+        await self.random_scroll()
+        await self.random_pause()
+
+    async def after_action(self):
+        """执行动作后的随机行为"""
+        await asyncio.sleep(random.uniform(0.3, 1.0))
+        await self.random_scroll()
+```
+
+---
+
+## Step 5：安全验证检测与人工通知
+
+```python
+# security/detector.py
+import asyncio
+from typing import Optional, Tuple
+from playwright.async_api import Page
+from rich.console import Console
+
+console = Console()
+
+
+class CaptchaDetector:
+    """验证码/人机验证检测器"""
+
+    def __init__(self, config):
+        self.config = config
+        self.indicators = config.captcha_indicators
+
+    async def check(self, page: Page) -> Tuple[bool, Optional[str]]:
+        """检查页面是否有验证"""
+        for indicator in self.indicators:
+            try:
+                element = await page.query_selector(indicator.selector)
+                if element:
+                    is_visible = await element.is_visible()
+                    if is_visible:
+                        console.print(
+                            f"[yellow]⚠️  检测到验证: {indicator.name}[/yellow]"
+                        )
+                        return True, indicator.name
+            except Exception:
+                continue
+
+        # 检查 URL 是否包含 challenge 相关
+        url = page.url.lower()
+        if any(x in url for x in ["challenge", "captcha", "verify", "check"]):
+            return True, "URL Challenge"
+
+        return False, None
+
+    async def wait_for_resolution(
+        self,
+        page: Page,
+        timeout_minutes: int = 30,
+        check_interval: int = 2,
+    ) -> bool:
+        """等待验证被解决"""
+        console.print("[cyan]⏳ 等待人工完成验证...[/cyan]")
+
+        timeout_seconds = timeout_minutes * 60
+        elapsed = 0
+
+        while elapsed < timeout_seconds:
+            has_captcha, _ = await self.check(page)
+            if not has_captcha:
+                console.print("[green]✅ 验证已完成[/green]")
+                return True
+
+            await asyncio.sleep(check_interval)
+            elapsed += check_interval
+
+            if elapsed % 30 == 0:
+                console.print(
+                    f"[yellow]⏳ 仍在等待验证... ({elapsed}s/{timeout_seconds}s)[/yellow]"
+                )
+
+        console.print("[red]❌ 等待验证超时[/red]")
+        return False
+```
+
+```python
+# security/notifier.py
+import asyncio
+import platform
+import subprocess
+from pathlib import Path
+from datetime import datetime
+from rich.console import Console
+
+console = Console()
+
+
+class HumanNotifier:
+    """人工通知器"""
+
+    def __init__(self, config):
+        self.config = config
+        self.screenshots_dir = Path("logs/screenshots")
+        self.screenshots_dir.mkdir(parents=True, exist_ok=True)
+
+    async def notify_captcha(self, page, captcha_type: str, site_name: str):
+        """通知需要人工处理验证"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        message = f"🔒 {site_name} 需要人工验证: {captcha_type}"
+
+        console.print(f"\n[bold red]{'=' * 60}[/bold red]")
+        console.print(f"[bold yellow]{message}[/bold yellow]")
+        console.print(f"[bold red]{'=' * 60}[/bold red]\n")
+
+        # 截图
+        if self.config.security.screenshot_on_captcha:
+            try:
+                screenshot_path = self.screenshots_dir / f"captcha_{timestamp}.png"
+                await page.screenshot(path=str(screenshot_path))
+                console.print(f"[cyan]📸 截图已保存: {screenshot_path}[/cyan]")
+            except Exception as e:
+                console.print(f"[yellow]截图失败: {e}[/yellow]")
+
+        # 声音通知
+        if self.config.security.notification_sound:
+            self._play_sound()
+
+        # 桌面通知
+        if self.config.security.desktop_notification:
+            self._desktop_notify(message, site_name)
+
+    def _play_sound(self):
+        """播放提示音"""
+        system = platform.system()
+        try:
+            if system == "Darwin":  # macOS
+                subprocess.run(
+                    ["afplay", "/System/Library/Sounds/Ping.aiff"],
+                    capture_output=True,
+                )
+            elif system == "Linux":
+                subprocess.run(
+                    ["paplay", "/usr/share/sounds/freedesktop/stereo/bell.oga"],
+                    capture_output=True,
+                )
+            elif system == "Windows":
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+        except Exception:
+            # 备用：终端响铃
+            print("\a")
+
+    def _desktop_notify(self, message: str, title: str):
+        """发送桌面通知"""
+        system = platform.system()
+        try:
+            if system == "Darwin":
+                subprocess.run([
+                    "osascript", "-e",
+                    f'display notification "{message}" with title "{title}"'
+                ], capture_output=True)
+            elif system == "Linux":
+                subprocess.run([
+                    "notify-send", "-u", "critical", title, message
+                ], capture_output=True)
+            elif system == "Windows":
+                try:
+                    from win10toast import ToastNotifier
+                    toaster = ToastNotifier()
+                    toaster.show_toast(title, message, duration=10)
+                except ImportError:
+                    pass
+        except Exception:
+            pass
+```
+
+```python
+# security/__init__.py
+from .detector import CaptchaDetector
+from .notifier import HumanNotifier
+
+
+class SecurityManager:
+    """安全管理器"""
+
+    def __init__(self, config):
+        self.config = config
+        self.detector = CaptchaDetector(config)
+        self.notifier = HumanNotifier(config)
+
+    async def check_and_handle(self, page, site_name: str) -> bool:
+        """检查验证并处理"""
+        has_captcha, captcha_type = await self.detector.check(page)
+
+        if not has_captcha:
+            return True
+
+        # 通知人工
+        await self.notifier.notify_captcha(page, captcha_type, site_name)
+
+        # 等待解决
+        if self.config.security.auto_pause:
+            resolved = await self.detector.wait_for_resolution(
+                page,
+                timeout_minutes=self.config.security.max_wait_minutes,
+            )
+            return resolved
+
+        return False
+```
+
+---
+
+## Step 6：智能限流器
+
+```python
+# limiter/rate.py
+import asyncio
+import time
+from collections import deque
+from typing import Dict, Optional
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from rich.console import Console
+
+console = Console()
+
+
+@dataclass
+class SiteStats:
+    """站点统计"""
+    name: str
+    requests_minute: deque = field(default_factory=lambda: deque(maxlen=100))
+    requests_hour: deque = field(default_factory=lambda: deque(maxlen=1000))
+    requests_day: deque = field(default_factory=lambda: deque(maxlen=10000))
+    last_request: Optional[float] = None
+    consecutive_success: int = 0
+    consecutive_failure: int = 0
+    cooldown_until: Optional[float] = None
+    cooldown_seconds: float = 0
+
+
+class RateLimiter:
+    """智能速率限制器"""
+
+    def __init__(self, config):
+        self.config = config
+        self.global_limit = config.global_rate_limit
+        self.site_stats: Dict[str, SiteStats] = {}
+        self._lock = asyncio.Lock()
+
+    def _get_stats(self, site_name: str) -> SiteStats:
+        if site_name not in self.site_stats:
+            self.site_stats[site_name] = SiteStats(name=site_name)
+        return self.site_stats[site_name]
+
+    def _get_limit(self, site_name: str):
+        """获取站点限制（优先站点独立配置，否则用全局）"""
+        site = self.config.get_site(site_name)
+        if site and site.rate_limit:
+            return site.rate_limit
+        return self.global_limit
+
+    def _count_recent(self, timestamps: deque, seconds: int) -> int:
+        """统计最近 N 秒内的请求数"""
+        cutoff = time.time() - seconds
+        return sum(1 for ts in timestamps if ts > cutoff)
+
+    async def acquire(self, site_name: str) -> float:
+        """
+        获取请求许可，返回需要等待的秒数
+        返回 0 表示可以立即请求
+        返回 -1 表示达到每日限制，无法请求
+        """
+        async with self._lock:
+            stats = self._get_stats(site_name)
+            limit = self._get_limit(site_name)
+            now = time.time()
+
+            # 检查冷却
+            if stats.cooldown_until and now < stats.cooldown_until:
+                wait = stats.cooldown_until - now
+                console.print(
+                    f"[yellow]⏳ {site_name} 冷却中，还需 {wait:.0f}s[/yellow]"
+                )
+                return wait
+
+            # 检查每日限制
+            day_count = self._count_recent(stats.requests_day, 86400)
+            if day_count >= limit.requests_per_day:
+                console.print(
+                    f"[red]🚫 {site_name} 达到每日限制 ({day_count}/{limit.requests_per_day})[/red]"
+                )
+                return -1
+
+            # 检查每小时限制
+            hour_count = self._count_recent(stats.requests_hour, 3600)
+            if hour_count >= limit.requests_per_hour:
+                wait = 3600 - (now - min(stats.requests_hour))
+                console.print(
+                    f"[yellow]⏳ {site_name} 达到每小时限制，等待 {wait:.0f}s[/yellow]"
+                )
+                return min(wait, 600)  # 最多等10分钟
+
+            # 检查每分钟限制
+            minute_count = self._count_recent(stats.requests_minute, 60)
+            if minute_count >= limit.requests_per_minute:
+                wait = 60 - (now - min(stats.requests_minute))
+                console.print(
+                    f"[yellow]⏳ {site_name} 达到每分钟限制，等待 {wait:.0f}s[/yellow]"
+                )
+                return wait
+
+            # 检查最小间隔
+            if stats.last_request:
+                elapsed = now - stats.last_request
+                if elapsed < limit.min_interval_seconds:
+                    wait = limit.min_interval_seconds - elapsed
+                    # 加入随机性
+                    wait += (limit.max_interval_seconds - limit.min_interval_seconds) * asyncio.get_event_loop().time() % 1
+                    return wait
+
+            return 0
+
+    async def record_request(self, site_name: str):
+        """记录一次请求"""
+        async with self._lock:
+            stats = self._get_stats(site_name)
+            now = time.time()
+            stats.requests_minute.append(now)
+            stats.requests_hour.append(now)
+            stats.requests_day.append(now)
+            stats.last_request = now
+
+    async def record_success(self, site_name: str):
+        """记录成功"""
+        async with self._lock:
+            stats = self._get_stats(site_name)
+            stats.consecutive_success += 1
+            stats.consecutive_failure = 0
+
+            # 连续成功后重置冷却
+            if stats.consecutive_success >= self.config.cooldown.reset_after_success:
+                stats.cooldown_seconds = 0
+                stats.cooldown_until = None
+
+    async def record_failure(self, site_name: str, trigger_cooldown: bool = False):
+        """记录失败"""
+        async with self._lock:
+            stats = self._get_stats(site_name)
+            stats.consecutive_failure += 1
+            stats.consecutive_success = 0
+
+            if trigger_cooldown:
+                # 计算冷却时间
+                if stats.cooldown_seconds == 0:
+                    stats.cooldown_seconds = self.config.cooldown.initial_seconds
+                else:
+                    stats.cooldown_seconds = min(
+                        stats.cooldown_seconds * self.config.cooldown.multiplier,
+                        self.config.cooldown.max_seconds,
+                    )
+                stats.cooldown_until = time.time() + stats.cooldown_seconds
+                console.print(
+                    f"[yellow]⚠️  {site_name} 进入冷却 {stats.cooldown_seconds:.0f}s[/yellow]"
+                )
+
+    def get_status(self) -> Dict:
+        """获取所有站点状态"""
+        status = {}
+        now = time.time()
+        for name, stats in self.site_stats.items():
+            limit = self._get_limit(name)
+            status[name] = {
+                "requests_last_minute": self._count_recent(stats.requests_minute, 60),
+                "requests_last_hour": self._count_recent(stats.requests_hour, 3600),
+                "requests_today": self._count_recent(stats.requests_day, 86400),
+                "limit_per_minute": limit.requests_per_minute,
+                "limit_per_hour": limit.requests_per_hour,
+                "limit_per_day": limit.requests_per_day,
+                "cooldown_remaining": max(0, (stats.cooldown_until or 0) - now),
+                "consecutive_success": stats.consecutive_success,
+                "consecutive_failure": stats.consecutive_failure,
+            }
+        return status
+```
+
+```python
+# limiter/balancer.py
+import asyncio
+import random
+from typing import Optional, List
+from rich.console import Console
+
+console = Console()
+
+
+class LoadBalancer:
+    """多站点负载均衡器"""
+
+    def __init__(self, config, rate_limiter):
+        self.config = config
+        self.limiter = rate_limiter
+        self._lock = asyncio.Lock()
+
+    async def select_site(
+        self,
+        model: str,
+        preferred_site: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        选择最佳站点
+        优先级：指定站点 > 支持该模型的可用站点 > 任意可用站点
+        """
+        async with self._lock:
+            sites = self.config.get_enabled_sites()
+
+            # 如果指定了站点
+            if preferred_site:
+                site = self.config.get_site(preferred_site)
+                if site and site.enabled:
+                    wait = await self.limiter.acquire(site.name)
+                    if wait >= 0:
+                        return site.name
+
+            # 按优先级筛选支持该模型的站点
+            candidates = []
+            for site in sites:
+                if model in site.models or not site.models:
+                    wait = await self.limiter.acquire(site.name)
+                    if wait == 0:  # 可以立即使用
+                        candidates.append((site, 0))
+                    elif wait > 0:  # 需要等待
+                        candidates.append((site, wait))
+
+            if not candidates:
+                console.print(f"[red]❌ 没有可用站点支持模型 {model}[/red]")
+                return None
+
+            # 优先选择可以立即使用的
+            immediate = [c for c in candidates if c[1] == 0]
+            if immediate:
+                # 在可立即使用的站点中随机选择（避免总是用同一个）
+                site, _ = random.choice(immediate)
+                return site.name
+
+            # 否则选择等待时间最短的
+            candidates.sort(key=lambda x: (x[0].priority, x[1]))
+            best_site, wait_time = candidates[0]
+
+            console.print(
+                f"[cyan]⏳ 最佳站点 {best_site.name} 需等待 {wait_time:.0f}s[/cyan]"
+            )
+            await asyncio.sleep(wait_time)
+            return best_site.name
+
+    def get_available_models(self) -> List[str]:
+        """获取所有可用模型"""
+        models = set()
+        for site in self.config.get_enabled_sites():
+            models.update(site.models.keys())
+        return sorted(list(models))
+```
+
+---
+
+## Step 7：浏览器管理（持久化 Profile + 反检测）
+
+```python
+# browser/stealth.py
+"""反检测脚本"""
+
+STEALTH_JS = """
+// 隐藏 webdriver
+Object.defineProperty(navigator, 'webdriver', {
+    get: () => undefined,
+});
+
+// 隐藏自动化特征
+delete navigator.__proto__.webdriver;
+
+// Chrome 运行时
+window.chrome = {
+    runtime: {},
+    loadTimes: function() {},
+    csi: function() {},
+    app: {},
+};
+
+// 权限 API
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+    parameters.name === 'notifications' ?
+        Promise.resolve({ state: Notification.permission }) :
+        originalQuery(parameters)
+);
+
+// 插件
+Object.defineProperty(navigator, 'plugins', {
+    get: () => [
+        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer' },
+        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai' },
+        { name: 'Native Client', filename: 'internal-nacl-plugin' },
+    ],
+});
+
+// 语言
+Object.defineProperty(navigator, 'languages', {
+    get: () => ['zh-CN', 'zh', 'en-US', 'en'],
+});
+
+// 平台
+Object.defineProperty(navigator, 'platform', {
+    get: () => 'Win32',
+});
+
+// 硬件并发数
+Object.defineProperty(navigator, 'hardwareConcurrency', {
+    get: () => 8,
+});
+
+// 设备内存
+Object.defineProperty(navigator, 'deviceMemory', {
+    get: () => 8,
+});
+
+// WebGL
+const getParameter = WebGLRenderingContext.prototype.getParameter;
+WebGLRenderingContext.prototype.getParameter = function(parameter) {
+    if (parameter === 37445) {
+        return 'Intel Inc.';
+    }
+    if (parameter === 37446) {
+        return 'Intel Iris OpenGL Engine';
+    }
+    return getParameter.apply(this, arguments);
+};
+
+// 时区
+Date.prototype.getTimezoneOffset = function() { return -480; }; // UTC+8
+
+// 控制台检测
+const originalConsole = window.console;
+window.console = {
+    ...originalConsole,
+    debug: () => {},
+};
+
+// iframe contentWindow
+try {
+    Object.defineProperty(HTMLIFrameElement.prototype, 'contentWindow', {
+        get: function() {
+            return window;
+        }
+    });
+} catch (e) {}
+
+console.log('Stealth mode activated');
+"""
+```
+
+```python
+# browser/profile.py
+import os
+import json
+import shutil
+from pathlib import Path
+from typing import Optional, Dict
+from datetime import datetime
+from rich.console import Console
+
+console = Console()
+
+PROFILES_DIR = Path(__file__).parent.parent / "profiles"
+PROFILES_DIR.mkdir(exist_ok=True)
+
+
+class ProfileManager:
+    """浏览器 Profile 管理"""
+
+    def __init__(self):
+        self.profiles_dir = PROFILES_DIR
+        self.metadata_file = self.profiles_dir / "metadata.json"
+        self._metadata = self._load_metadata()
+
+    def _load_metadata(self) -> Dict:
+        if self.metadata_file.exists():
+            with open(self.metadata_file, "r") as f:
+                return json.load(f)
+        return {"profiles": {}}
+
+    def _save_metadata(self):
+        with open(self.metadata_file, "w") as f:
+            json.dump(self._metadata, f, indent=2)
+
+    def get_profile_path(self, site_name: str) -> Path:
+        """获取站点专用 Profile 路径"""
+        profile_path = self.profiles_dir / site_name
+        profile_path.mkdir(exist_ok=True)
+
+        # 记录元数据
+        if site_name not in self._metadata["profiles"]:
+            self._metadata["profiles"][site_name] = {
+                "created": datetime.now().isoformat(),
+                "last_used": None,
+                "use_count": 0,
+            }
+            self._save_metadata()
+
+        return profile_path
+
+    def mark_used(self, site_name: str):
+        """标记 Profile 被使用"""
+        if site_name in self._metadata["profiles"]:
+            self._metadata["profiles"][site_name]["last_used"] = datetime.now().isoformat()
+            self._metadata["profiles"][site_name]["use_count"] += 1
+            self._save_metadata()
+
+    def clear_profile(self, site_name: str):
+        """清除站点 Profile（登录态失效时）"""
+        profile_path = self.profiles_dir / site_name
+        if profile_path.exists():
+            shutil.rmtree(profile_path)
+            console.print(f"[yellow]🗑️  已清除 {site_name} 的 Profile[/yellow]")
+
+        if site_name in self._metadata["profiles"]:
+            del self._metadata["profiles"][site_name]
+            self._save_metadata()
+
+    def list_profiles(self) -> Dict:
+        """列出所有 Profile 状态"""
+        return self._metadata.get("profiles", {})
+```
+
+```python
+# browser/manager.py
+import asyncio
+import random
+from typing import Optional, Dict
+from pathlib import Path
+from playwright.async_api import async_playwright, Browser, BrowserContext, Page
+from rich.console import Console
+
+from .profile import ProfileManager
+from .stealth import STEALTH_JS
+from config import config, PROFILES_DIR
+
+console = Console()
+
+
+class BrowserManager:
+    """浏览器实例管理"""
+
+    def __init__(self):
+        self._playwright = None
+        self._browsers: Dict[str, Browser] = {}
+        self._contexts: Dict[str, BrowserContext] = {}
+        self._pages: Dict[str, Page] = {}
+        self._profile_manager = ProfileManager()
+        self._lock = asyncio.Lock()
+
+    async def start(self):
+        """启动 Playwright"""
+        console.print("[cyan]🌐 启动浏览器管理器...[/cyan]")
+        self._playwright = await async_playwright().start()
+
+    async def stop(self):
+        """停止所有浏览器"""
+        for name, page in self._pages.items():
+            try:
+                await page.close()
+            except Exception:
+                pass
+
+        for name, ctx in self._contexts.items():
+            try:
+                await ctx.close()
+            except Exception:
+                pass
+
+        for name, browser in self._browsers.items():
+            try:
+                await browser.close()
+            except Exception:
+                pass
+
+        if self._playwright:
+            await self._playwright.stop()
+
+        console.print("[yellow]👋 浏览器已关闭[/yellow]")
+
+    async def get_page(self, site_name: str) -> Page:
+        """获取站点专用页面（持久化 Profile）"""
+        async with self._lock:
+            if site_name in self._pages:
+                page = self._pages[site_name]
+                if not page.is_closed():
+                    return page
+
+            # 获取或创建 context
+            context = await self._get_or_create_context(site_name)
+            page = await context.new_page()
+
+            # 注入反检测脚本
+            await page.add_init_script(STEALTH_JS)
+
+            # 设置额外 headers
+            await page.set_extra_http_headers({
+                "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                "sec-ch-ua": '"Chromium";v="126", "Google Chrome";v="126", "Not-A.Brand";v="8"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+            })
+
+            self._pages[site_name] = page
+            self._profile_manager.mark_used(site_name)
+
+            return page
+
+    async def _get_or_create_context(self, site_name: str) -> BrowserContext:
+        """获取或创建浏览器上下文"""
+        if site_name in self._contexts:
+            return self._contexts[site_name]
+
+        # 获取 Profile 路径
+        profile_path = self._profile_manager.get_profile_path(site_name)
+
+        # 启动持久化上下文（保留登录状态）
+        context = await self._playwright.chromium.launch_persistent_context(
+            user_data_dir=str(profile_path),
+            headless=config.HEADLESS,
+            viewport={"width": 1280 + random.randint(-50, 50),
+                      "height": 800 + random.randint(-50, 50)},
+            locale="zh-CN",
+            timezone_id="Asia/Shanghai",
+            geolocation={"latitude": 31.2304, "longitude": 121.4737},  # 上海
+            permissions=["geolocation"],
+            color_scheme="light",
+            args=[
+                "--no-sandbox",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+                "--disable-infobars",
+                "--disable-background-networking",
+                "--disable-default-apps",
+                "--disable-extensions",
+                "--disable-sync",
+                "--disable-translate",
+                "--metrics-recording-only",
+                "--mute-audio",
+                "--no-first-run",
+                f"--window-size={1280 + random.randint(-50, 50)},{800 + random.randint(-50, 50)}",
+            ],
+            ignore_default_args=["--enable-automation"],
+        )
+
+        self._contexts[site_name] = context
+        console.print(f"[green]✅ {site_name} 浏览器上下文已创建[/green]")
+        return context
+
+    async def clear_site(self, site_name: str):
+        """清除站点的浏览器状态"""
+        if site_name in self._pages:
+            try:
+                await self._pages[site_name].close()
+            except Exception:
+                pass
+            del self._pages[site_name]
+
+        if site_name in self._contexts:
+            try:
+                await self._contexts[site_name].close()
+            except Exception:
+                pass
+            del self._contexts[site_name]
+
+        self._profile_manager.clear_profile(site_name)
+
+
+# 全局实例
+browser_manager = BrowserManager()
+```
+
+---
+
+## Step 8：通用网站适配器（配置驱动）
+
+```python
+# providers/base.py
+from abc import ABC, abstractmethod
+from typing import AsyncGenerator, List, Optional
+from dataclasses import dataclass
+
+
+@dataclass
+class Message:
+    role: str
+    content: str
+
+
+@dataclass
+class ChatResult:
+    content: str
+    model: str
+    site: str
+    tokens_estimated: int = 0
+```
+
+```python
+# providers/generic.py
+import asyncio
+import random
+from typing import AsyncGenerator, List, Optional
+from playwright.async_api import Page, TimeoutError as PlaywrightTimeout
+from rich.console import Console
+
+from .base import Message, ChatResult
+from browser.manager import browser_manager
+from behavior.human import HumanBehavior
+from security import SecurityManager
+from limiter.rate import RateLimiter
+from config import config, SiteConfig
+
+console = Console()
+
+
+class GenericProvider:
+    """通用网站 Provider（配置驱动）"""
+
+    # 常见选择器（用于自动检测）
+    COMMON_INPUT_SELECTORS = [
+        'textarea[class*="input" i]',
+        'textarea[class*="chat" i]',
+        'textarea[class*="message" i]',
+        'textarea[placeholder*="message" i]',
+        'textarea[placeholder*="ask" i]',
+        'textarea[placeholder*="type" i]',
+        'textarea',
+        '[contenteditable="true"]',
+        'input[type="text"][class*="chat" i]',
+    ]
+
+    COMMON_SEND_SELECTORS = [
+        'button[type="submit"]',
+        'button[class*="send" i]',
+        'button[aria-label*="send" i]',
+        'button[class*="submit" i]',
+        '[role="button"][class*="send" i]',
+    ]
+
+    COMMON_RESPONSE_SELECTORS = [
+        '[class*="message" i][class*="bot" i]',
+        '[class*="message" i][class*="assistant" i]',
+        '[class*="response" i]',
+        '[class*="answer" i]',
+        '[class*="markdown" i]',
+        '[class*="prose" i]',
+        '[data-testid*="message" i]',
+        '[data-testid*="response" i]',
+        '[data-testid*="answer" i]',
+    ]
+
+    COMMON_STOP_SELECTORS = [
+        'button[class*="stop" i]',
+        'button[aria-label*="stop" i]',
+        '[class*="generating" i]',
+        '[class*="loading" i]',
+    ]
+
+    def __init__(
+        self,
+        site_config: SiteConfig,
+        rate_limiter: RateLimiter,
+        security_manager: SecurityManager,
+    ):
+        self.site = site_config
+        self.limiter = rate_limiter
+        self.security = security_manager
+        self._detected_selectors = {}
+
+    async def chat(
+        self,
+        messages: List[Message],
+        model: str = "default",
+        stream: bool = True,
+    ) -> AsyncGenerator[str, None]:
+        """执行对话"""
+
+        # 获取速率许可
+        wait_time = await self.limiter.acquire(self.site.name)
+        if wait_time < 0:
+            yield "[ERROR] 达到每日请求限制"
+            return
+        if wait_time > 0:
+            console.print(f"[cyan]⏳ 等待 {wait_time:.0f}s...[/cyan]")
+            await asyncio.sleep(wait_time)
+
+        try:
+            page = await browser_manager.get_page(self.site.name)
+            human = HumanBehavior(page, config)
+
+            # 导航到站点
+            if not page.url.startswith(self.site.url):
+                console.print(f"[cyan]🌐 导航到 {self.site.url}[/cyan]")
+                await page.goto(self.site.url, wait_until="domcontentloaded")
+                await asyncio.sleep(random.uniform(2, 4))
+
+                # 检查安全验证
+                ok = await self.security.check_and_handle(page, self.site.name)
+                if not ok:
+                    await self.limiter.record_failure(self.site.name, trigger_cooldown=True)
+                    yield "[ERROR] 安全验证未通过"
+                    return
+
+            # 选择模型（如果支持）
+            await self._select_model(page, model, human)
+
+            # 准备输入
+            prompt = self._build_prompt(messages)
+
+            # 找到输入框
+            input_sel = await self._find_selector(page, "input", self.COMMON_INPUT_SELECTORS)
+            if not input_sel:
+                yield "[ERROR] 找不到输入框"
+                return
+
+            # 人类行为：随机动作
+            await human.before_action()
+
+            # 输入文本
+            console.print(f"[cyan]⌨️  输入中... ({len(prompt)} 字符)[/cyan]")
+            await human.type_text(input_sel, prompt, fast=len(prompt) > 300)
+
+            # 人类行为：短暂停顿
+            await asyncio.sleep(random.uniform(0.5, 1.5))
+
+            # 发送
+            await self._send_message(page, human)
+
+            # 记录请求
+            await self.limiter.record_request(self.site.name)
+
+            # 检查安全验证
+            await asyncio.sleep(1)
+            ok = await self.security.check_and_handle(page, self.site.name)
+            if not ok:
+                await self.limiter.record_failure(self.site.name, trigger_cooldown=True)
+                yield "[ERROR] 发送后触发安全验证"
+                return
+
+            # 流式读取响应
+            response_sel = await self._find_selector(
+                page, "response", self.COMMON_RESPONSE_SELECTORS
+            )
+
+            total_text = ""
+            async for chunk in self._stream_response(page, response_sel):
+                total_text += chunk
+                yield chunk
+
+            # 记录成功
+            await self.limiter.record_success(self.site.name)
+            console.print(
+                f"[green]✅ 完成，共 {len(total_text)} 字符[/green]"
+            )
+
+        except PlaywrightTimeout as e:
+            await self.limiter.record_failure(self.site.name)
+            console.print(f"[red]❌ 超时: {e}[/red]")
+            yield f"[ERROR] 请求超时"
+
+        except Exception as e:
+            await self.limiter.record_failure(self.site.name)
+            console.print(f"[red]❌ 错误: {e}[/red]")
+            yield f"[ERROR] {str(e)}"
+
+    async def _find_selector(
+        self,
+        page: Page,
+        selector_type: str,
+        fallbacks: List[str],
+    ) -> Optional[str]:
+        """查找有效选择器"""
+        # 先尝试配置的选择器
+        configured = self.site.selectors.get(selector_type)
+        if configured:
+            try:
+                el = await page.wait_for_selector(configured, timeout=3000)
+                if el:
+                    self._detected_selectors[selector_type] = configured
+                    return configured
+            except PlaywrightTimeout:
+                pass
+
+        # 缓存的选择器
+        if selector_type in self._detected_selectors:
+            try:
+                el = await page.wait_for_selector(
+                    self._detected_selectors[selector_type], timeout=2000
+                )
+                if el:
+                    return self._detected_selectors[selector_type]
+            except PlaywrightTimeout:
+                pass
+
+        # 遍历常见选择器
+        for selector in fallbacks:
+            try:
+                el = await page.wait_for_selector(selector, timeout=2000)
+                if el and await el.is_visible():
+                    self._detected_selectors[selector_type] = selector
+                    console.print(
+                        f"[dim]🔍 自动检测到 {selector_type}: {selector[:50]}...[/dim]"
+                    )
+                    return selector
+            except PlaywrightTimeout:
+                continue
+
+        return None
+
+    async def _select_model(self, page: Page, model: str, human: HumanBehavior):
+        """选择模型（如果网站支持）"""
+        model_name = self.site.models.get(model, model)
+
+        # 尝试找到模型选择器
+        model_sel = self.site.selectors.get("model_selector")
+        if not model_sel:
+            return
+
+        try:
+            await human.click_element(model_sel)
+            await asyncio.sleep(0.5)
+            # 尝试点击对应模型
+            await page.click(f'text="{model_name}"', timeout=3000)
+            await asyncio.sleep(0.3)
+            console.print(f"[cyan]🤖 已选择模型: {model_name}[/cyan]")
+        except Exception:
+            pass
+
+    async def _send_message(self, page: Page, human: HumanBehavior):
+        """发送消息"""
+        # 方法1：尝试点击发送按钮
+        send_sel = await self._find_selector(page, "send_button", self.COMMON_SEND_SELECTORS)
+        if send_sel:
+            try:
+                await human.click_element(send_sel)
+                return
+            except Exception:
+                pass
+
+        # 方法2：回车发送
+        await page.keyboard.press("Enter")
+
+    async def _stream_response(
+        self,
+        page: Page,
+        response_sel: Optional[str],
+    ) -> AsyncGenerator[str, None]:
+        """流式读取响应"""
+        if not response_sel:
+            response_sel = '[class*="message"]'
+
+        last_text = ""
+        stable_count = 0
+        max_wait = config.global_rate_limit.max_interval_seconds * 2
+
+        for _ in range(int(max_wait / 0.5)):
+            await asyncio.sleep(0.5)
+
+            try:
+                # 获取所有响应元素
+                elements = await page.query_selector_all(response_sel)
+                if not elements:
+                    continue
+
+                # 获取最后一个（最新响应）
+                last_el = elements[-1]
+                current_text = await last_el.inner_text()
+
+                if current_text != last_text:
+                    # 有新内容
+                    new_part = current_text[len(last_text):]
+                    if new_part:
+                        yield new_part
+                    last_text = current_text
+                    stable_count = 0
+                else:
+                    stable_count += 1
+
+                    # 检查是否还在生成
+                    stop_sel = self.site.selectors.get("stop_button")
+                    if stop_sel:
+                        stop_btn = await page.query_selector(stop_sel)
+                        if stop_btn:
+                            continue  # 还在生成
+
+                    # 检查通用停止指示器
+                    for sel in self.COMMON_STOP_SELECTORS:
+                        indicator = await page.query_selector(sel)
+                        if indicator and await indicator.is_visible():
+                            stable_count = 0  # 重置，还在生成
+                            break
+
+                    # 稳定 4 次认为生成完毕
+                    if stable_count >= 4:
+                        break
+
+            except Exception as e:
+                console.print(f"[yellow]⚠️ 读取响应: {e}[/yellow]")
+                continue
+
+    def _build_prompt(self, messages: List[Message]) -> str:
+        """构建提示词"""
+        # 如果只有一条用户消息，直接返回
+        if len(messages) == 1 and messages[0].role == "user":
+            return messages[0].content
+
+        # 多轮对话：合并历史
+        parts = []
+        for msg in messages:
+            if msg.role == "system":
+                parts.append(f"[System]: {msg.content}")
+            elif msg.role == "user":
+                parts.append(f"Human: {msg.content}")
+            elif msg.role == "assistant":
+                parts.append(f"Assistant: {msg.content}")
+        return "\n\n".join(parts)
+
+    async def get_current_model(self, page: Page) -> str:
+        """获取当前使用的模型"""
+        model_indicator = self.site.selectors.get("model_indicator")
+        if model_indicator:
+            try:
+                el = await page.query_selector(model_indicator)
+                if el:
+                    text = await el.inner_text()
+                    return text.strip()
+            except Exception:
+                pass
+        return "unknown"
+```
+
+---
+
+## Step 9：桥接验证器
+
+```python
+# providers/validator.py
+import asyncio
+from typing import Dict, Tuple
+from rich.console import Console
+
+from .generic import GenericProvider, Message
+from browser.manager import browser_manager
+from limiter.rate import RateLimiter
+from security import SecurityManager
+from config import config
+
+console = Console()
+
+
+class BridgeValidator:
+    """桥接验证器"""
+
+    TEST_PROMPT = "请用一句话介绍你自己，包括你的名字或型号。"
+
+    def __init__(self, rate_limiter: RateLimiter, security_manager: SecurityManager):
+        self.limiter = rate_limiter
+        self.security = security_manager
+
+    async def validate_site(self, site_name: str) -> Tuple[bool, str, str]:
+        """
+        验证单个站点
+        返回: (是否成功, 检测到的模型, 错误信息)
+        """
+        site = config.get_site(site_name)
+        if not site:
+            return False, "", f"站点 {site_name} 不存在"
+
+        console.print(f"\n[cyan]🔍 验证站点: {site.name} ({site.url})[/cyan]")
+
+        provider = GenericProvider(site, self.limiter, self.security)
+
+        try:
+            # 发送测试消息
+            response = ""
+            async for chunk in provider.chat(
+                [Message(role="user", content=self.TEST_PROMPT)],
+                model="default",
+            ):
+                response += chunk
+
+            if "[ERROR]" in response:
+                return False, "", response
+
+            if len(response) < 10:
+                return False, "", "响应过短"
+
+            # 尝试获取模型信息
+            page = await browser_manager.get_page(site_name)
+            detected_model = await provider.get_current_model(page)
+
+            console.print(f"[green]✅ {site.name} 验证成功[/green]")
+            console.print(f"[dim]   响应: {response[:100]}...[/dim]")
+            console.print(f"[dim]   检测到模型: {detected_model}[/dim]")
+
+            return True, detected_model, ""
+
+        except Exception as e:
+            return False, "", str(e)
+
+    async def validate_all(self) -> Dict:
+        """验证所有已配置站点"""
+        results = {}
+
+        console.print("\n[bold cyan]═══ 开始验证所有站点 ═══[/bold cyan]\n")
+
+        for site in config.get_enabled_sites():
+            success, model, error = await self.validate_site(site.name)
+            results[site.name] = {
+                "success": success,
+                "detected_model": model,
+                "error": error,
+                "url": site.url,
+            }
+
+            # 验证之间加入间隔
+            await asyncio.sleep(5)
+
+        # 打印总结
+        console.print("\n[bold cyan]═══ 验证结果总结 ═══[/bold cyan]")
+        success_count = sum(1 for r in results.values() if r["success"])
+        console.print(
+            f"[{'green' if success_count > 0 else 'red'}]"
+            f"成功: {success_count}/{len(results)}[/]"
+        )
+
+        for name, result in results.items():
+            status = "✅" if result["success"] else "❌"
+            console.print(f"  {status} {name}: {result['detected_model'] or result['error']}")
+
+        return results
+```
+
+---
+
+## Step 10：主服务（OpenAI 兼容 API）
+
+```python
+# main.py
+import asyncio
+import json
+import time
+import uuid
+from contextlib import asynccontextmanager
+from typing import List, Optional, AsyncGenerator
+
+import uvicorn
+from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from rich.console import Console
+
+from config import config
+from browser.manager import browser_manager
+from limiter.rate import RateLimiter
+from limiter.balancer import LoadBalancer
+from security import SecurityManager
+from providers.generic import GenericProvider, Message
+from providers.validator import BridgeValidator
+
+console = Console()
+
+# 全局实例
+rate_limiter = RateLimiter(config)
+security_manager = SecurityManager(config)
+load_balancer = LoadBalancer(config, rate_limiter)
+validator = BridgeValidator(rate_limiter, security_manager)
+
+# Provider 缓存
+_providers = {}
+
+
+def get_provider(site_name: str) -> GenericProvider:
+    if site_name not in _providers:
+        site = config.get_site(site_name)
+        if not site:
+            raise ValueError(f"站点不存在: {site_name}")
+        _providers[site_name] = GenericProvider(site, rate_limiter, security_manager)
+    return _providers[site_name]
+
+
+# ─── Pydantic 模型 ────────────────────────────────────────────
+
+class ChatMessage(BaseModel):
+    role: str
+    content: str
+
+class ChatRequest(BaseModel):
+    model: str = "default"
+    messages: List[ChatMessage]
+    stream: bool = True
+    site: Optional[str] = None  # 指定站点
+
+
+# ─── 生命周期 ────────────────────────────────────────────────
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    console.print("""
+[bold cyan]
+╔═══════════════════════════════════════════════════════════╗
+║     🛡️  AI Bridge - 极低风控模型桥接器                   ║
+║                                                           ║
+║   • 真人行为模拟                                          ║
+║   • 智能速率限制                                          ║
+║   • 安全验证自动暂停                                       ║
+║   • 多站点负载均衡                                         ║
+╚═══════════════════════════════════════════════════════════╝
+[/bold cyan]
+""")
+
+    await browser_manager.start()
+
+    sites = config.get_enabled_sites()
+    console.print(f"[green]✅ 已加载 {len(sites)} 个站点[/green]")
+    for site in sites:
+        console.print(f"   • {site.name}: {site.url}")
+
+    console.print(f"\n[blue]🌐 服务地址: http://{config.HOST}:{config.PORT}[/blue]")
+    console.print(f"[blue]📖 API 文档: http://{config.HOST}:{config.PORT}/docs[/blue]")
+    console.print(f"[blue]🔑 API Key: {config.API_KEY}[/blue]\n")
+
+    yield
+
+    await browser_manager.stop()
+
+
+app = FastAPI(
+    title="AI Bridge",
+    description="极低风控 AI 模型网页桥接器",
+    version="2.0.0",
+    lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+# ─── 鉴权 ─────────────────────────────────────────────────────
+
+def verify_key(authorization: Optional[str] = Header(None)):
+    if not authorization:
+        raise HTTPException(401, "Missing Authorization")
+    token = authorization.replace("Bearer ", "")
+    if token != config.API_KEY:
+        raise HTTPException(401, "Invalid API Key")
+
+
+# ─── 路由 ─────────────────────────────────────────────────────
+
+@app.get("/")
+async def root():
+    return {
+        "name": "AI Bridge",
+        "version": "2.0.0",
+        "sites": [s.name for s in config.get_enabled_sites()],
+        "models": load_balancer.get_available_models(),
+    }
+
+
+@app.get("/v1/models")
+async def list_models(authorization: Optional[str] = Header(None)):
+    verify_key(authorization)
+
+    models = []
+    for site in config.get_enabled_sites():
+        for model_id, model_name in site.models.items():
+            models.append({
+                "id": f"{site.name}/{model_id}",
+                "object": "model",
+                "created": int(time.time()),
+                "owned_by": site.name,
+            })
+    return {"object": "list", "data": models}
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(
+    request: ChatRequest,
+    authorization: Optional[str] = Header(None),
+):
+    verify_key(authorization)
+
+    # 解析 model
+    if "/" in request.model:
+        site_name, model_name = request.model.split("/", 1)
+    else:
+        site_name = request.site
+        model_name = request.model
+
+    # 如果没有指定站点，自动选择
+    if not site_name:
+        site_name = await load_balancer.select_site(model_name)
+        if not site_name:
+            raise HTTPException(503, "没有可用站点")
+
+    provider = get_provider(site_name)
+    messages = [Message(role=m.role, content=m.content) for m in request.messages]
+
+    console.print(
+        f"[cyan]📨 请求: site={site_name} model={model_name} "
+        f"messages={len(messages)} stream={request.stream}[/cyan]"
+    )
+
+    if request.stream:
+        return StreamingResponse(
+            _stream_sse(provider, messages, model_name, site_name),
+            media_type="text/event-stream",
+        )
+    else:
+        return await _blocking_response(provider, messages, model_name, site_name)
+
+
+async def _stream_sse(
+    provider: GenericProvider,
+    messages: List[Message],
+    model: str,
+    site: str,
+) -> AsyncGenerator[bytes, None]:
+    """SSE 流式响应"""
+    response_id = f"chatcmpl-{uuid.uuid4().hex[:8]}"
+    created = int(time.time())
+
+    try:
+        async for chunk in provider.chat(messages, model, stream=True):
+            if chunk.startswith("[ERROR]"):
+                data = {"error": {"message": chunk, "type": "api_error"}}
+                yield f"data: {json.dumps(data)}\n\n".encode()
+                break
+
+            data = {
+                "id": response_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": f"{site}/{model}",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"role": "assistant", "content": chunk},
+                    "finish_reason": None,
+                }],
+            }
+            yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+
+        # 结束
+        end_data = {
+            "id": response_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": f"{site}/{model}",
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+        }
+        yield f"data: {json.dumps(end_data)}\n\n".encode()
+        yield b"data: [DONE]\n\n"
+
+    except Exception as e:
+        data = {"error": {"message": str(e), "type": "api_error"}}
+        yield f"data: {json.dumps(data)}\n\n".encode()
+        yield b"data: [DONE]\n\n"
+
+
+async def _blocking_response(
+    provider: GenericProvider,
+    messages: List[Message],
+    model: str,
+    site: str,
+):
+    """非流式响应"""
+    full_text = ""
+    async for chunk in provider.chat(messages, model, stream=False):
+        if chunk.startswith("[ERROR]"):
+            raise HTTPException(500, chunk)
+        full_text += chunk
+
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": f"{site}/{model}",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": full_text},
+            "finish_reason": "stop",
+        }],
+        "usage": {
+            "prompt_tokens": sum(len(m.content) // 4 for m in messages),
+            "completion_tokens": len(full_text) // 4,
+            "total_tokens": sum(len(m.content) // 4 for m in messages) + len(full_text) // 4,
+        },
+    }
+
+
+# ─── 管理接口 ─────────────────────────────────────────────────
+
+@app.get("/admin/status")
+async def admin_status(authorization: Optional[str] = Header(None)):
+    """获取限流状态"""
+    verify_key(authorization)
+    return {
+        "rate_limits": rate_limiter.get_status(),
+        "sites": [
+            {"name": s.name, "url": s.url, "priority": s.priority}
+            for s in config.get_enabled_sites()
+        ],
+    }
+
+
+@app.post("/admin/validate")
+async def admin_validate(
+    site: Optional[str] = None,
+    authorization: Optional[str] = Header(None),
+):
+    """验证桥接"""
+    verify_key(authorization)
+
+    if site:
+        success, model, error = await validator.validate_site(site)
+        return {"site": site, "success": success, "model": model, "error": error}
+    else:
+        results = await validator.validate_all()
+        return {"results": results}
+
+
+@app.post("/admin/clear-profile/{site}")
+async def admin_clear_profile(site: str, authorization: Optional[str] = Header(None)):
+    """清除站点 Profile（重新登录）"""
+    verify_key(authorization)
+    await browser_manager.clear_site(site)
+    return {"cleared": site}
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok", "timestamp": int(time.time())}
+
+
+# ─── 启动 ─────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    uvicorn.run(
+        "main:app",
+        host=config.HOST,
+        port=config.PORT,
+        reload=False,
+        log_level="warning",
+    )
+```
+
+---
+
+## Step 11：创建 .env
+
+```bash
+cat > .env << 'EOF'
+# 服务配置
+HOST=0.0.0.0
+PORT=8080
+API_KEY=your-secret-key-change-me
+
+# 浏览器配置
+# false = 显示浏览器窗口（推荐，方便人工验证）
+# true  = 无头模式
+HEADLESS=false
+
+# 调试模式
+DEBUG=false
+EOF
+```
+
+---
+
+## Step 12：启动与测试
+
+```bash
+# 1. 启动服务
+python main.py
+
+# 2. 验证所有站点（新开终端）
+curl -X POST http://localhost:8080/admin/validate \
+  -H "Authorization: Bearer your-secret-key-change-me" | python3 -m json.tool
+
+# 3. 查看限流状态
+curl http://localhost:8080/admin/status \
+  -H "Authorization: Bearer your-secret-key-change-me" | python3 -m json.tool
+
+# 4. 测试对话（流式）
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer your-secret-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-4o",
+    "messages": [{"role": "user", "content": "你好，请介绍一下你自己"}],
+    "stream": true
+  }'
+
+# 5. 指定站点
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer your-secret-key-change-me" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "poe/claude-3-5-sonnet",
+    "messages": [{"role": "user", "content": "写一首诗"}],
+    "stream": true
+  }'
+```
+
+---
+
+## 在你的项目中使用
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8080/v1",
+    api_key="your-secret-key-change-me",
+)
+
+# 自动负载均衡
+response = client.chat.completions.create(
+    model="gpt-4o",  # 自动选择可用站点
+    messages=[{"role": "user", "content": "解释量子计算"}],
+    stream=True,
+)
+
+for chunk in response:
+    if chunk.choices[0].delta.content:
+        print(chunk.choices[0].delta.content, end="", flush=True)
+```
+
+---
+
+## 核心特性总结
+
+| 特性 | 说明 |
+|---|---|
+| ✅ **配置驱动** | 只需在 `sites.yaml` 填入网址，自动适配 |
+| ✅ **真人行为** | 贝塞尔曲线鼠标、高斯打字、随机暂停/滚动 |
+| ✅ **持久化 Profile** | 保留登录态，无需重复登录 |
+| ✅ **安全验证暂停** | 检测到 CAPTCHA 自动暂停 + 声音/桌面通知 |
+| ✅ **智能限流** | 分钟/小时/天限制 + 动态冷却 |
+| ✅ **多站点负载均衡** | 自动选择最佳可用站点 |
+| ✅ **自动验证** | 启动后可验证所有站点连通性 |
+| ✅ **模型识别** | 自动检测当前使用的模型 |
+| ✅ **OpenAI 兼容** | 标准接口，无缝接入现有项目 |
