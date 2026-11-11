@@ -1,0 +1,454 @@
+global:
+  rate_limit:
+    requests_per_minute: 2
+    requests_per_hour: 30
+    requests_per_day: 200
+    min_interval_seconds: 25
+    max_interval_seconds: 120
+
+  behavior:
+    typing_speed_min_ms: 40
+    typing_speed_max_ms: 180
+    typing_mistake_rate: 0.02
+    mouse_speed_min: 200
+    mouse_speed_max: 800
+    scroll_probability: 0.3
+    pause_probability: 0.15
+    pause_duration_min: 1.0
+    pause_duration_max: 5.0
+
+  cooldown:
+    initial_seconds: 300
+    max_seconds: 3600
+    multiplier: 2.0
+    reset_after_success: 3
+
+  security:
+    auto_pause: true
+    notification_sound: true
+    desktop_notification: true
+    max_wait_minutes: 30
+    screenshot_on_captcha: true
+
+
+sites:
+  # 优先组：venice / openrouter（按用户要求置顶展示，保证可用）
+  - name: openrouter
+    enabled: true
+    # OpenRouter 聊天沙盒（AI Chat Playground），游客可见输入框，
+    # 实际提交需要一次免费登录（或用 API Key 走 free-gateway 的 or/* 模型）
+    url: "https://openrouter.ai/chat"
+    priority: 2
+
+    selectors:
+      input: 'textarea'
+      send_button: 'button[aria-label="Send message"]'
+      # 回复容器类名需登录后实测补充；先用宽泛兜底
+      response: '[class*="markdown" i], [class*="prose" i], [class*="message" i]'
+      stop_button: 'button[aria-label*="stop" i]'
+      response_timeout: 150
+
+    models:
+      openrouter-default: "default"
+
+  - name: poe
+    enabled: true
+    url: "https://poe.com"
+    priority: 6
+
+    selectors:
+      input: 'textarea.GrowingTextArea_textArea__ZWQbP, textarea.GrowingTextArea'
+      send_button: 'button[aria-label*="发送" i], button[aria-label*="send" i]'
+      response: '[class*="Message_botMessageBubble"], [class*="message-bubble"]'
+      stop_button: '[class*="StopButton"]'
+
+    rate_limit:
+      requests_per_hour: 40
+
+    models:
+      gpt-4o: "GPT-4o"
+      gpt-4o-mini: "GPT-4o-Mini"
+      claude-3-5-sonnet: "Claude-3.5-Sonnet"
+      claude-3-opus: "Claude-3-Opus"
+      gemini-1.5-pro: "Gemini-1.5-Pro"
+      llama-3-70b: "Llama-3-70b"
+
+
+  - name: perplexity
+    enabled: true
+    url: "https://www.perplexity.ai"
+    priority: 2
+
+    selectors:
+      input: 'textarea[placeholder*="Ask"]'
+      response: '[class*="prose"], [data-testid="answer"]'
+      model_indicator: '[class*="ModelSelector"] span'
+
+    models:
+      pplx-online: "default"
+      claude-3-5-sonnet: "claude-3.5-sonnet"
+      gpt-4o: "gpt-4o"
+
+
+  - name: you
+    enabled: true
+    url: "https://you.com"
+    priority: 3
+
+    selectors:
+      input: 'textarea[name="query"], input[type="text"]'
+      response: '[data-testid="youchat-answer"]'
+
+    models:
+      you-default: "default"
+
+
+  - name: grok
+    enabled: true
+    url: "https://grok.com"
+    priority: 4
+
+    selectors:
+      input: 'textarea[placeholder*="Ask" i], textarea[placeholder*="message" i], textarea'
+      send_button: 'button[aria-label*="send" i], button[aria-label*="Ask" i], textarea + button'
+      response: '[class*="message" i], [class*="response" i], [class*="prose" i]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      grok-3: "grok-3"
+      grok-3-mini: "grok-3-mini"
+
+
+  - name: zai
+    enabled: true
+    # 2026-11: z.ai 改版，chat.z.ai 现重定向至 zchat.z.ai；聊天入口在根页面
+    url: "https://zchat.z.ai"
+    priority: 3
+
+    selectors:
+      # 登录校验（组合条件）：有聊天输入框 且 页面无"登录"入口 ⇒ 已登录
+      # （游客根页面也有演示输入框，必须叠加反面条件才能区分）
+      logged_in_selector: 'textarea.input-scroll, #chat-input, !a:has-text("登录"), !button:has-text("登录")'
+      login_check_url: "https://zchat.z.ai"
+      input: 'textarea.input-scroll, #chat-input'
+      send_button: '#send-message-button, button[type="submit"]'
+      # 模型回复文本：assistant 消息气泡内的 markdown 容器（实测 chat.z.ai DOM）
+      response: 'div.chat-assistant .markdown-prose'
+      stop_button: 'button[aria-label*="stop" i], button[aria-label*="停止" i]'
+      model_selector: 'button[class*="model" i], [class*="model-selector" i], [aria-label*="model" i]'
+      # 模型下拉选项的叶子节点（div.line-clamp-1），按文本精确匹配
+      model_option: 'div.line-clamp-1'
+      # 编程问答场景用 Chat 模式：秒级响应、代码输出干净
+      # （Agent 模式慢且其工具跑在 zai 云沙箱，改本地文件需走 API 通道）
+      # 如需切回 Agent 模式：改为 default_mode: 'agent'
+      mode_agent: 'button:has-text("Agent 模式")'
+      mode_chat: 'button:has-text("Chat 模式")'
+      default_mode: 'chat'
+      # Agent 模式思考+生成较慢，回复捕获超时(秒)；超时未捕获到回复将显式报错
+      response_timeout: 150
+      thinking_toggle: '[class*="thinking" i][class*="toggle" i], [class*="think" i][class*="switch" i], [class*="deep" i][class*="mode" i], [aria-label*="thinking" i]'
+      # 剥离回答前缀的思考标签（行级匹配）
+      response_strip_prefix: '深度思考|思考过程|正在思考|跳过|思考中'
+
+    # 只保留最新的前 3 个 GLM 模型（如需旧模型，把对应行加回来即可）
+    # zai-default: 不切换模型，用网页当前选中的
+    models:
+      zai-default: "default"
+      glm-5.3-flash: "GLM-5.3-Flash"
+      glm-5.3: "GLM-5.3"
+      glm-5.2: "GLM-5.2"
+      # glm-5-turbo: "GLM-5-Turbo"
+      # glm-5v-turbo: "GLM-5V-Turbo"
+      # glm-4.7: "GLM-4.7"
+      # glm-4-plus: "GLM-4-plus"
+      # glm-4: "GLM-4"
+      # glm-4-flash: "GLM-4-Flash"
+      # glm-4-air: "GLM-4-Air"
+      # glm-4-airx: "GLM-4-AirX"
+      # glm-4v: "GLM-4V"
+
+    # z.ai 通过 CDP 复用系统 Chrome 登录态，可适当放宽限流
+    # max_interval 是请求间的随机抖动上限，调小可明显降低单条回复延迟
+    rate_limit:
+      requests_per_minute: 6
+      requests_per_hour: 120
+      requests_per_day: 1000
+      min_interval_seconds: 8
+      max_interval_seconds: 12
+
+
+  - name: arena
+    enabled: true
+    url: "https://arena.ai/code"
+    priority: 2
+
+    selectors:
+      input: 'textarea[placeholder*="Describe" i], textarea.box-border'
+      send_button: 'button[aria-label*="Send" i], button[aria-label*="send" i]'
+      response: '[class*="message" i], [class*="prose" i], [class*="markdown" i]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      arena-default: "default"
+
+
+  - name: chatgpt
+    enabled: true
+    url: "https://chatgpt.com"
+    priority: 3
+
+    selectors:
+      input: '[contenteditable="true"][data-id*="root"], [contenteditable="true"][aria-label*="ChatGPT"], .ProseMirror'
+      send_button: 'button[data-testid="send-button"], button[aria-label*="send" i], button[data-uid]'
+      response: '[data-message-author-role="assistant"] [class*="markdown"], .markdown'
+      stop_button: 'button[data-testid="stop-button"], button[aria-label*="stop" i]'
+
+    models:
+      gpt-4o: "gpt-4o"
+      gpt-4o-mini: "gpt-4o-mini"
+      o1: "o1"
+      o3-mini: "o3-mini"
+
+
+  - name: deepseek
+    enabled: true
+    url: "https://chat.deepseek.com"
+    priority: 8
+
+    selectors:
+      input: 'textarea[placeholder*="message" i], textarea[placeholder*="ask" i], [contenteditable="true"], textarea'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      response: '[class*="message" i][class*="assistant" i], [class*="prose"], [class*="markdown"]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      deepseek-default: "default"
+
+  - name: doubao
+    enabled: false   # 按需求移除：不再暴露为可用模型
+    url: "https://www.doubao.com"
+    priority: 5
+
+    selectors:
+      input: 'textarea.semi-input-textarea, textarea[placeholder*="发消息" i], textarea'
+      send_button: 'button[type="submit"], button[aria-label*="send" i], button:has-text("发送")'
+      response: '[class*="message" i][class*="bot" i], [class*="markdown" i], [class*="prose" i]'
+      stop_button: 'button[aria-label*="stop" i], button[aria-label*="停止" i]'
+
+    models:
+      doubao-default: "default"
+      doubao-pro-32k: "豆包·model_scope"
+      doubao-lite-32k: "豆包·model_scope·lite"
+
+  - name: groq
+    enabled: true
+    url: "https://groq.com"
+    priority: 10
+
+    selectors:
+      input: 'textarea[placeholder*="message" i], textarea[placeholder*="ask" i], [contenteditable="true"], textarea'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      response: '[class*="message" i][class*="assistant" i], [class*="prose"], [class*="markdown"]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      groq-default: "default"
+
+  - name: huggingchat
+    enabled: true
+    url: "https://huggingface.co/chat"
+    priority: 11
+
+    selectors:
+      input: 'textarea[placeholder*="ask" i]'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      response: '[class*="message" i][class*="assistant" i], [class*="prose"], [class*="markdown"]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      huggingchat-default: "default"
+
+  - name: mistral
+    enabled: true
+    url: "https://chat.mistral.ai"
+    priority: 12
+
+    selectors:
+      input: 'textarea[placeholder*="message" i], textarea[placeholder*="ask" i], [contenteditable="true"], textarea'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      response: '[class*="message" i][class*="assistant" i], [class*="prose"], [class*="markdown"]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      mistral-default: "default"
+
+  - name: phind
+    enabled: true
+    url: "https://www.phind.com"
+    priority: 13
+
+    selectors:
+      input: 'textarea[placeholder*="message" i], textarea[placeholder*="ask" i], [contenteditable="true"], textarea'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      response: '[class*="message" i][class*="assistant" i], [class*="prose"], [class*="markdown"]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      phind-default: "default"
+
+  - name: qwen
+    enabled: true
+    url: "https://chat.qwen.ai"
+    priority: 14
+
+    selectors:
+      input: 'textarea[placeholder*="message" i], textarea[placeholder*="ask" i], [contenteditable="true"], textarea'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      response: '[class*="message" i][class*="assistant" i], [class*="prose"], [class*="markdown"]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      qwen-default: "default"
+
+  - name: tiangong
+    enabled: true
+    url: "https://www.tiangong.cn"
+    priority: 15
+
+    selectors:
+      input: 'textarea[placeholder*="message" i], textarea[placeholder*="ask" i], [contenteditable="true"], textarea'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      response: '[class*="message" i][class*="assistant" i], [class*="prose"], [class*="markdown"]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      tiangong-default: "default"
+
+  - name: venice
+    enabled: true
+    # 必须用经典聊天：默认的 /chat/agent 是 Agent 模式，会把任务复述进
+    # assistant-content 块并等确认，永远不产生真正的回复（桥接只能抓到复读）
+    url: "https://venice.ai/chat/classic"
+    priority: 1
+
+    selectors:
+      # 登录校验（正反组合）：页面已渲染出输入框(正面) 且 无"Venice Guest"按钮(反面)
+      # 才判定已登录 —— 纯反面条件会在页面加载中/空白时误判
+      logged_in_selector: 'textarea, !button:has-text("Venice Guest"), !a:has-text("Venice Guest"), !span:has-text("Venice Guest")'
+      login_check_url: "https://venice.ai/chat/classic"
+      input: 'textarea[placeholder*="message" i], textarea[placeholder*="ask" i], [contenteditable="true"], textarea'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      # 经典模式下 assistant 回复在用户气泡之后，取文档序最后一个匹配即可；
+      # assistant-content 放最前兜底 agent 页面残留
+      response: 'div.assistant-content, [class*="markdown" i], [class*="prose"]'
+      stop_button: 'button[aria-label*="stop" i]'
+      response_timeout: 150
+
+    models:
+      venice-default: "default"
+
+  - name: yuanbao
+    enabled: true
+    url: "https://yuanbao.tencent.com"
+    priority: 17
+
+    selectors:
+      input: 'textarea[placeholder*="message" i], textarea[placeholder*="ask" i], [contenteditable="true"], textarea'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      response: '[class*="message" i][class*="assistant" i], [class*="prose"], [class*="markdown"]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      yuanbao-default: "default"
+
+  - name: kimi
+    enabled: true
+    url: "https://kimi.moonshot.cn"
+    priority: 18
+
+    selectors:
+      input: 'textarea[placeholder*="message" i], textarea[placeholder*="ask" i], [contenteditable="true"], textarea'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      response: '[class*="message" i][class*="assistant" i], [class*="prose"], [class*="markdown"]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      kimi-default: "default"
+
+  - name: happycapy
+    enabled: true
+    url: "https://happycapy.ai/app"
+    priority: 7
+
+    selectors:
+      input: 'textarea[placeholder*="Ask" i], textarea.w-full'
+      send_button: 'button[type="submit"], button[aria-label*="send" i]'
+      response: '[class*="message" i], [class*="prose" i], [class*="markdown" i]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      happycapy-default: "default"
+
+  - name: cohere
+    enabled: true
+    url: "https://coral.cohere.com"
+    priority: 19
+
+    selectors:
+      input: 'textarea[placeholder*="message" i], textarea[placeholder*="ask" i], [contenteditable="true"], textarea'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      response: '[class*="message" i][class*="assistant" i], [class*="prose"], [class*="markdown"]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      cohere-default: "default"
+
+  - name: hackaigc
+    enabled: true
+    url: "https://chat.hackaigc.com"
+    priority: 20
+
+    selectors:
+      input: 'textarea[placeholder*="message" i], textarea[placeholder*="ask" i], [contenteditable="true"], textarea'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      response: '[class*="message" i][class*="assistant" i], [class*="prose"], [class*="markdown"]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      hackaigc-default: "default"
+
+  - name: nanogpt
+    enabled: true
+    url: "https://nano-gpt.com"
+    priority: 21
+
+    selectors:
+      input: 'textarea[placeholder*="message" i], textarea[placeholder*="ask" i], [contenteditable="true"], textarea'
+      send_button: 'button[aria-label*="send" i], button[type="submit"]'
+      response: '[class*="message" i][class*="assistant" i], [class*="prose"], [class*="markdown"]'
+      stop_button: 'button[aria-label*="stop" i]'
+
+    models:
+      nanogpt-default: "default"
+
+captcha_indicators:
+  - selector: '#challenge-running, #challenge-stage'
+    name: "Cloudflare Challenge"
+  - selector: 'iframe[src*="challenges.cloudflare.com"]'
+    name: "Cloudflare Turnstile"
+  - selector: 'iframe[src*="hcaptcha.com"]'
+    name: "hCaptcha"
+  - selector: '[class*="hcaptcha"]'
+    name: "hCaptcha Widget"
+  - selector: 'iframe[src*="recaptcha"]'
+    name: "reCAPTCHA"
+  - selector: '.g-recaptcha'
+    name: "reCAPTCHA Widget"
+  - selector: '[class*="captcha" i], [id*="captcha" i]'
+    name: "Generic Captcha"
+  - selector: '[class*="challenge" i], [id*="challenge" i]'
+    name: "Generic Challenge"
+  - selector: 'text="Verify you are human"'
+    name: "Human Verification Text"
+  - selector: 'text="Please complete the security check"'
+    name: "Security Check Text"

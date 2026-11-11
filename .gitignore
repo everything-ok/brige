@@ -27,3 +27,15 @@ node-compile-cache/
 dist/
 build/
 *.spec
+
+# ── MSI 构建产物（源码保留在 msi/payload 与 msi/*.wxs）──
+msi/*.msi
+msi/*.wixpdb
+msi/payload/*.exe
+
+# ── 本地调试临时文件 ──
+_bridge.*.log
+_phone*.png
+_err*.png
+_*.ps1
+_patch_payload.py
