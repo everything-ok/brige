@@ -111,8 +111,14 @@ class GenericProvider:
         messages: List[Message],
         model: str = "default",
         stream: bool = True,
+        captcha_wait_minutes: Optional[int] = None,
     ) -> AsyncGenerator[str, None]:
-        """执行对话"""
+        """执行对话
+
+        captcha_wait_minutes: 遇到验证码时等待人工处理的分钟数。
+        API/IDE 调用应传 0~1（挂住 30 分钟会让 IDE 侧请求超时）；
+        交互式 CLI 可传 None 用配置默认值。
+        """
         from config import config
 
         wait_time = await self.limiter.acquire(self.site.name)
@@ -146,7 +152,7 @@ class GenericProvider:
                 # 关闭可能存在的遮罩层/弹窗
                 await self._close_overlays(page)
 
-                ok = await self.security.check_and_handle(page, self.site.name)
+                ok = await self.security.check_and_handle(page, self.site.name, captcha_wait_minutes)
                 if not ok:
                     await self.limiter.record_failure(self.site.name, trigger_cooldown=True)
                     yield "[ERROR] 安全验证未通过"
@@ -199,7 +205,7 @@ class GenericProvider:
             await self.limiter.record_request(self.site.name)
 
             await asyncio.sleep(1)
-            ok = await self.security.check_and_handle(page, self.site.name)
+            ok = await self.security.check_and_handle(page, self.site.name, captcha_wait_minutes)
             if not ok:
                 await self.limiter.record_failure(self.site.name, trigger_cooldown=True)
                 yield "[ERROR] 发送后触发安全验证"

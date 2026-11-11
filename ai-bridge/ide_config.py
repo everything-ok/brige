@@ -60,7 +60,11 @@ ALL_IDES = [
          type="zed", extra_cc=False),
     dict(key="code",     name="VSCode",         exe_names=["code"],
          win_paths=[os.path.join(HOME,"AppData","Local","Programs","Microsoft VS Code","Code.exe"),
-                    r"C:\Program Files\Microsoft VS Code\Code.exe"],
+                    r"C:\Program Files\Microsoft VS Code\Code.exe",
+                    r"C:\Program Files (x86)\Microsoft VS Code\Code.exe",
+                    r"D:\Microsoft VS Code\Code.exe",
+                    r"D:\Program Files\Microsoft VS Code\Code.exe",
+                    r"D:\VSCode\Code.exe"],
          config_file=os.path.join(HOME,"AppData","Roaming","Code","User","settings.json"),
          type="vscode", extra_cc=True),
     dict(key="claude",   name="Claude Desktop", exe_names=["claude"],
@@ -420,15 +424,34 @@ def configure_ide(ide_key, base_url, api_key, models, mcp_block, claude_code_blo
     # 4. 重启（VSCode 注入桥接环境变量，仅对该实例生效）
     if restart:
         time.sleep(0.3)
-        extra_env = build_vscode_bridge_env(api_key) if ide["key"] == "code" else None
-        exe, err = start_ide(ide, extra_env=extra_env)
-        if exe:
-            cprint(f"  [OK] Started {ide['name']}", "green")
-            if extra_env:
-                cprint(f"  [OK] 桥接环境变量已注入此 VSCode 实例 (Claude -> {extra_env['ANTHROPIC_BASE_URL']}, 模型 {extra_env['ANTHROPIC_MODEL']})", "green")
-                cprint(f"  [i] 仅对此 VSCode 生效；Kiro 等其他 IDE 的 Claude 不受影响", "dim")
+        if ide["key"] == "code":
+            # VSCode 走 continue_config.restart_vscode：
+            # 完全退出（taskkill /F /T，等进程真正结束）再重开，
+            # 否则旧实例接管新请求，Continue 的 config.yaml 不会刷新。
+            try:
+                import continue_config as cc
+                res = cc.restart_vscode(extra_env=build_vscode_bridge_env(api_key))
+                if res.get("ok"):
+                    cprint("  [OK] Restarted VSCode (完全重启)", "green")
+                    cprint(f"  [OK] 桥接环境变量已注入此 VSCode 实例 "
+                           f"(Claude -> {BRIDGE_BASE}/v1, 模型 {DEFAULT_MODEL})", "green")
+                    cprint("  [i] 仅对此 VSCode 生效；Kiro 等其他 IDE 的 Claude 不受影响", "dim")
+                else:
+                    cprint(f"  [--] Restart failed: {res.get('reason')}", "yellow")
+                    exe, err = start_ide(ide, extra_env=build_vscode_bridge_env(api_key))
+                    if exe:
+                        cprint("  [OK] Started VSCode (fallback)", "green")
+            except Exception as e:
+                cprint(f"  [--] restart_vscode 失败: {e}", "yellow")
+                exe, err = start_ide(ide, extra_env=build_vscode_bridge_env(api_key))
+                if exe:
+                    cprint("  [OK] Started VSCode (fallback)", "green")
         else:
-            cprint(f"  [--] Start failed: {err} (please start manually)", "yellow")
+            exe, err = start_ide(ide)
+            if exe:
+                cprint(f"  [OK] Started {ide['name']}", "green")
+            else:
+                cprint(f"  [--] Start failed: {err} (please start manually)", "yellow")
     else:
         cprint(f"  [i] Config written, please restart {ide['name']} manually", "yellow")
 

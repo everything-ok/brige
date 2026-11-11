@@ -111,8 +111,14 @@ LOGIN_REQUIRED_SITES = {"poe", "perplexity", "you", "chatgpt", "kimi", "doubao",
 
 # 其中：注册/登录需要手机号验证的站点（独立页签，暂不支持邮箱自动登录）
 PHONE_REQUIRED_SITES = {"zai", "deepseek", "qwen", "tiangong", "yuanbao", "kimi", "doubao"}
+
 # 其余为邮箱登录站点（可在管理页配置邮箱+密码自动登录）
 EMAIL_LOGIN_SITES = LOGIN_REQUIRED_SITES - PHONE_REQUIRED_SITES
+
+# API/IDE 请求遇到验证码时的等待分钟数。
+# 交互式 CLI 可以等人工过验证码，但 IDE 里的请求挂 30 分钟会直接超时，
+# 所以走 HTTP API 的路径用这个较短的值（默认 1 分钟，够手动过一次）。
+API_CAPTCHA_WAIT_MINUTES = int(_os.getenv("API_CAPTCHA_WAIT_MINUTES", "1"))
 
 # ── 模型用途标签（Zed 选择器显示简述，便于用户知道哪个模型适合做什么）──
 _MODEL_PURPOSE_TAGS = [
@@ -155,15 +161,35 @@ def _display_for(mid: str, seen: dict) -> str:
     return f"{s}｜{tag}" if tag else s
 
 
-def get_site_model_ids() -> List[str]:
-    """按优先级返回所有启用站点的名字（一个站点 = 一个模型）"""
-    return [s.name for s in config.get_enabled_sites()]
+def get_site_model_ids(only_available: bool = False) -> List[str]:
+    """按优先级返回所有启用站点的名字（一个站点 = 一个模型）
+
+    only_available=True 时剔除登录态已明确失效的站点，
+    与 /v1/models 的暴露策略保持一致（避免 IDE 里选了却必然失败）。
+    """
+    sites = config.get_enabled_sites()
+    if not only_available:
+        return [s.name for s in sites]
+
+    from browser import profile_manager
+    out = []
+    for s in sites:
+        if s.name in LOGIN_REQUIRED_SITES and \
+                profile_manager.get_login_status(s.name) is False:
+            continue
+        out.append(s.name)
+    return out
 
 
 def default_site_model() -> str:
     """默认模型 = 优先级最高站点名（zai）"""
     ids = get_site_model_ids()
     return ids[0] if ids else "zai"
+
+
+def catalog_ids(catalog: List[dict]) -> set:
+    """目录里已有的站点/模型 id 集合"""
+    return {item["model"] for item in catalog if item.get("group") == "bridge"}
 
 
 def resolve_site_model(model: Optional[str]):
@@ -1814,7 +1840,8 @@ async def _try_with_fallback(messages, model_name, original_site):
         error_msg = None
 
         try:
-            async for chunk in provider.chat(messages, model_name, stream=False):
+            async for chunk in provider.chat(messages, model_name, stream=False,
+                                              captcha_wait_minutes=API_CAPTCHA_WAIT_MINUTES):
                 if chunk.startswith("[ERROR]"):
                     error_msg = chunk
                     break
@@ -1899,7 +1926,8 @@ async def _stream_sse_with_fallback(messages, model_name, original_site, stream)
         error_msg = None
 
         try:
-            async for chunk in provider.chat(messages, model_name, stream=True):
+            async for chunk in provider.chat(messages, model_name, stream=True,
+                                          captcha_wait_minutes=API_CAPTCHA_WAIT_MINUTES):
                 if chunk.startswith("[ERROR]"):
                     error_msg = chunk
                     break
@@ -2071,7 +2099,8 @@ async def _stream_sse_anthropic(messages, model_name: str, pinned_site: Optional
         error_msg = None
 
         try:
-            async for chunk in provider.chat(messages, model_name, stream=True):
+            async for chunk in provider.chat(messages, model_name, stream=True,
+                                          captcha_wait_minutes=API_CAPTCHA_WAIT_MINUTES):
                 if chunk.startswith("[ERROR]"):
                     error_msg = chunk
                     break
@@ -2833,7 +2862,9 @@ async def ide_configure(ide_key: str, project: Optional[str] = None):
             import continue_config as cc
 
             # 统一目录：bridge 站点 + openrouter 免费模型 + 本地 Ollama + auto 链
-            catalog = model_catalog.build_catalog(get_site_model_ids())
+            # only_available=True：剔除登录态已失效的站点，
+            # 与 /v1/models 暴露策略一致（否则 IDE 里选了必然失败）
+            catalog = model_catalog.build_catalog(get_site_model_ids(only_available=True))
             entries = model_catalog.continue_models(catalog, api_key=api_key)
 
             # 默认模型优先 openrouter（免登录、API 直连、稳定），
@@ -2854,6 +2885,13 @@ async def ide_configure(ide_key: str, project: Optional[str] = None):
             )
             continue_written = res
             continue_default = res.get("default")
+            # 告知哪些站点因登录态失效被排除
+            skipped = [s for s in get_site_model_ids()
+                       if s not in catalog_ids(catalog)]
+            if skipped:
+                res["skipped_sites"] = skipped
+                console.print(f"[yellow]⚠️ 以下站点登录态失效，未写入 Continue: "
+                             f"{', '.join(skipped)}[/yellow]")
             console.print(f"[green]✅ Continue 配置已写入: {res['path']}"
                          f"（{res['added']} 个模型，默认 {res.get('default')}）[/green]")
         except Exception as e:
