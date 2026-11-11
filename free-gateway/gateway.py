@@ -398,8 +398,9 @@ async def _stream_ollama(real_model: str, body: dict) -> AsyncGenerator[tuple, N
     payload = {"model": real_model, "messages": body.get("messages", []),
                "stream": True, "keep_alive": "30m"}
     # Ollama 原生支持 tools（格式与 OpenAI 一致）
-    if body.get("tools"):
-        payload["tools"] = body["tools"]
+    tools = body.get("tools") or None
+    if tools:
+        payload["tools"] = tools
     async with httpx.AsyncClient(timeout=300) as cli:
         async with cli.stream("POST", f"{OLLAMA_BASE}/api/chat", json=payload) as r:
             if r.status_code == 404:
@@ -407,7 +408,20 @@ async def _stream_ollama(real_model: str, body: dict) -> AsyncGenerator[tuple, N
                 detail = (await r.aread()).decode(errors="replace")[:200]
                 raise RuntimeError(f"ollama 模型不存在: {real_model}（{detail}）")
             if r.status_code != 200:
-                raise RuntimeError(f"ollama {r.status_code}")
+                detail = (await r.aread()).decode(errors="replace")[:200]
+                # 该模型不支持原生 tools（如 dolphin-mistral / qwen-abliterate）
+                #   → "does not support tools"
+                # 或消息结构不被接受（assistant.tool_calls / role=tool）
+                #   → "can't find closing '}'"
+                # 两种情况都退化为「文本模拟工具调用」：把 schema 注入 prompt，
+                # 再从回复文本里解析 ```tool_call 围栏
+                if tools and ("does not support tools" in detail
+                              or "closing '}'" in detail
+                              or "invalid" in detail.lower()):
+                    async for piece in _stream_ollama_text_tools(real_model, body, tools):
+                        yield piece
+                    return
+                raise RuntimeError(f"ollama {r.status_code}: {detail[:120]}")
             async for line in r.aiter_lines():
                 if not line.strip():
                     continue
@@ -468,6 +482,148 @@ async def _stream_bridge(model_name: str, body: dict) -> AsyncGenerator[tuple, N
                 tcs = delta.get("tool_calls")
                 if tcs:
                     yield ("tool_calls", tcs)
+
+
+async def _stream_ollama_text_tools(real_model: str, body: dict,
+                                    tools: list) -> AsyncGenerator[tuple, None]:
+    """不支持原生 tools 的 Ollama 模型走「文本模拟工具调用」。
+
+    与 ai-bridge/tool_emulation.py 同思路：把 schema 渲染成自然语言说明注入
+    最后一条 user 消息，模型用 ```tool_call 围栏输出，再解析成 OpenAI tool_calls。
+    这样 dolphin-mistral / qwen-abliterate 这类小模型也能在 Agent 模式里用。
+    """
+    import re
+
+    instr = ["", "--- 可用工具 ---",
+             "你可以调用下列工具来完成操作。如果需要调用工具，"
+             "请**只**输出一段 JSON（不要有多余解释），格式如下：", "",
+             "```tool_call",
+             '{"name": "工具名", "arguments": {"参数名": "参数值"}}',
+             "```", "", "工具列表："]
+    for t in tools:
+        fn = (t or {}).get("function") or {}
+        params = fn.get("parameters") or {}
+        props = params.get("properties") or {}
+        required = set(params.get("required") or [])
+        instr.append(f"- {fn.get('name', '')}: {fn.get('description') or ''}")
+        for pname, pschema in props.items():
+            mark = "*" if pname in required else ""
+            ptype = (pschema or {}).get("type", "string")
+            instr.append(f"  - {pname}{mark} ({ptype})")
+        instr.append(f"  完整参数 schema: {json.dumps(params, ensure_ascii=False)}")
+    instr += ["", "参数 schema 里带 * 的是必填参数。若不需要调用工具，正常回答即可。",
+              "--- 工具说明结束 ---"]
+    instr_text = "\n".join(instr)
+
+    # Ollama 原生 /api/chat 不接受 role="tool" 和 assistant.tool_calls
+    # （无 tools 参数时报 "can't find closing '}'"）→ 统一拍平成可读文本
+    msgs = []
+    for m in (body.get("messages") or []):
+        role = m.get("role")
+        if role == "tool":
+            content = m.get("content")
+            if isinstance(content, list):
+                content = "".join(
+                    c.get("text", "") for c in content
+                    if isinstance(c, dict) and c.get("type") == "text")
+            msgs.append({"role": "user",
+                         "content": f"[工具 {m.get('name', '')} 执行结果]\n{content or ''}"})
+            continue
+        if role == "assistant" and m.get("tool_calls"):
+            names = []
+            for tc in m.get("tool_calls") or []:
+                f = tc.get("function") or {}
+                names.append(f"{f.get('name', '')}({f.get('arguments', '')})")
+            msgs.append({"role": "user",
+                         "content": f"[已请求调用工具: {', '.join(names)}]"})
+            continue
+        c = m.get("content")
+        msgs.append({"role": role,
+                     "content": c if isinstance(c, str)
+                     else json.dumps(c or "", ensure_ascii=False)})
+
+    idx = None
+    for i in range(len(msgs) - 1, -1, -1):
+        if msgs[i].get("role") == "user":
+            idx = i
+            break
+    if idx is None:
+        idx = len(msgs) - 1
+    if idx >= 0:
+        c = msgs[idx].get("content")
+        msgs[idx]["content"] = (c if isinstance(c, str) else json.dumps(c or "", ensure_ascii=False)) + instr_text
+
+    payload = {"model": real_model, "messages": msgs, "stream": True, "keep_alive": "30m"}
+    text_parts = []
+    fence_re = re.compile(r"```(?:tool_call|tool-call|toolcall)?\s*(\{.*?\})\s*```",
+                          re.DOTALL | re.IGNORECASE)
+
+    async with httpx.AsyncClient(timeout=300) as cli:
+        async with cli.stream("POST", f"{OLLAMA_BASE}/api/chat", json=payload) as r:
+            if r.status_code != 200:
+                detail = (await r.aread()).decode(errors="replace")[:200]
+                raise RuntimeError(f"ollama {r.status_code}: {detail[:120]}")
+            async for line in r.aiter_lines():
+                if not line.strip():
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception:
+                    continue
+                delta = (obj.get("message") or {}).get("content", "")
+                if delta:
+                    text_parts.append(delta)
+
+    text = "".join(text_parts)
+    if not text.strip():
+        return
+
+    call = None
+    m = fence_re.search(text)
+    if m:
+        try:
+            call = json.loads(m.group(1).strip())
+        except Exception:
+            call = None
+    if call is None:
+        # 小模型经常不写围栏，直接输出裸 JSON → 兜底解析
+        stripped = text.strip()
+        if stripped.startswith("{") and '"name"' in stripped:
+            try:
+                obj = json.loads(stripped)
+                if isinstance(obj, dict) and obj.get("name"):
+                    call = obj
+            except Exception:
+                call = None
+
+    if call is None:
+        # 不是工具调用 → 原样作为文本输出
+        yield ("text", text)
+        return
+
+    if not isinstance(call, dict) or not call.get("name"):
+        yield ("text", text)
+        return
+    allowed = {((t or {}).get("function") or {}).get("name") for t in tools}
+    allowed.discard(None)
+    if allowed and call.get("name") not in allowed:
+        # 未知工具 → 当作普通文本
+        yield ("text", text)
+        return
+    args = call.get("arguments") or call.get("parameters") or {}
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except Exception:
+            args = {"input": args}
+    if not isinstance(args, dict):
+        args = {"input": args}
+    fn = call.get("name", "")
+    yield ("tool_calls", [{
+        "id": f"call_{abs(hash(fn)) % 100000}",
+        "type": "function",
+        "function": {"name": fn, "arguments": json.dumps(args, ensure_ascii=False)},
+    }])
 
 
 async def _stream_openrouter(real_model: str, body: dict) -> AsyncGenerator[tuple, None]:

@@ -166,6 +166,8 @@ def get_site_model_ids(only_available: bool = False) -> List[str]:
 
     only_available=True 时剔除登录态已明确失效的站点，
     与 /v1/models 的暴露策略保持一致（避免 IDE 里选了却必然失败）。
+    只要 profile 里显式标记 is_logged_in=False 就剔除，
+    不局限于 LOGIN_REQUIRED_SITES —— 运行期探测出的失效站点同样要剔除。
     """
     sites = config.get_enabled_sites()
     if not only_available:
@@ -174,8 +176,7 @@ def get_site_model_ids(only_available: bool = False) -> List[str]:
     from browser import profile_manager
     out = []
     for s in sites:
-        if s.name in LOGIN_REQUIRED_SITES and \
-                profile_manager.get_login_status(s.name) is False:
+        if profile_manager.get_login_status(s.name) is False:
             continue
         out.append(s.name)
     return out
@@ -1524,6 +1525,49 @@ async def login_site(site_name: str):
         browser_manager.visible_sites.discard(site_name)
 
 
+@app.post("/login/batch")
+async def login_batch(sites: Optional[str] = None, timeout_minutes: int = 10):
+    """批量登录多个站点（依次弹出可见浏览器窗口）。
+
+    sites 省略时，对所有「登录态明确失效」的站点依次执行 /login/{site} 流程。
+    每个站点失败不中断整体，最后返回每个站点的结果。
+    """
+    from browser import profile_manager
+
+    if sites:
+        names = [s.strip() for s in sites.split(",") if s.strip()]
+    else:
+        names = [s.name for s in config.get_enabled_sites()
+                 if profile_manager.get_login_status(s.name) is False]
+
+    if not names:
+        return {"success": True, "results": [], "message": "没有需要登录的站点"}
+
+    results = []
+    for name in names:
+        if not config.get_site(name):
+            results.append({"site": name, "success": False, "message": "站点不存在"})
+            continue
+        console.print(f"[cyan]🔐 批量登录: {name}[/cyan]")
+        try:
+            r = await login_site(name)
+            results.append({"site": name, "success": bool(r.get("success")),
+                            "message": r.get("message")})
+        except Exception as e:
+            results.append({"site": name, "success": False, "message": str(e)})
+
+    ok = [r["site"] for r in results if r["success"]]
+    failed = [r["site"] for r in results if not r["success"]]
+    return {
+        "success": bool(ok),
+        "results": results,
+        "logged_in": ok,
+        "failed": failed,
+        "message": f"登录成功 {len(ok)}/{len(results)}"
+                   + (f"，失败: {', '.join(failed)}" if failed else ""),
+    }
+
+
 async def _check_still_logged_in(page, site_name: str) -> bool:
     """检查页面是否仍然处于登录状态。
     站点配置 logged_in_selector 时导航到 login_check_url 并按组合条件判断
@@ -1598,8 +1642,7 @@ async def list_models(authorization: Optional[str] = Header(None)):
     from browser import profile_manager
     models = []
     for site in config.get_enabled_sites():
-        if site.name in LOGIN_REQUIRED_SITES and \
-                profile_manager.get_login_status(site.name) is False:
+        if profile_manager.get_login_status(site.name) is False:
             continue
         models.append({
             "id": site.name,
@@ -2992,6 +3035,56 @@ async def ide_configure(ide_key: str, project: Optional[str] = None):
             "manual_config": manual, "base_url": base_url,
             "message": "自动写入失败，请手动复制以下配置",
         }
+
+
+@app.post("/ide/refresh-continue")
+async def refresh_continue(restart: bool = False):
+    """只刷新 Continue 的 config.yaml（不重启 IDE）。
+
+    用于站点登录态变化后，把已失效的 bridge 模型从下拉框里剔除、
+    把新可用的站点加回来。restart=True 时顺便彻底重启 VSCode。
+    """
+    import continue_config as cc
+
+    api_key = config.API_KEY or "any"
+    catalog = model_catalog.build_catalog(get_site_model_ids(only_available=True))
+    entries = model_catalog.continue_models(catalog, api_key=api_key)
+
+    default_entry = None
+    for item in catalog:
+        if item.get("group") == "openrouter":
+            default_entry = next(
+                (e for e in entries if e["name"] == item["title"]), None)
+            break
+    if default_entry is None and entries:
+        default_entry = entries[0]
+
+    res = cc.write_continue_config(
+        entries,
+        set_default=True,
+        default_title=default_entry["name"] if default_entry else None,
+    )
+    skipped = [s for s in get_site_model_ids()
+               if s not in catalog_ids(catalog)]
+    if skipped:
+        res["skipped_sites"] = skipped
+
+    restarted = False
+    if restart:
+        r = await asyncio.get_event_loop().run_in_executor(
+            None, lambda: cc.restart_vscode())
+        restarted = bool(r.get("ok"))
+
+    return {
+        "success": True,
+        "written": [res["path"]],
+        "models": len(entries),
+        "default": res.get("default"),
+        "skipped_sites": skipped,
+        "restarted": restarted,
+        "message": ("Continue 配置已刷新" + ("，VSCode 已重启" if restarted else
+                                     "，重启 VSCode 后生效")),
+    }
 
 
 if __name__ == "__main__":

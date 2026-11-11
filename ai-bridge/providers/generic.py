@@ -211,6 +211,14 @@ class GenericProvider:
                 yield "[ERROR] 发送后触发安全验证"
                 return
 
+            # 发送后页面可能弹出了登录墙（游客态发消息会要求登录），
+            # 这时发送按钮会失效/消息发不出去 → 标记为需要登录，
+            # 让 IDE 的模型列表把它剔除，而不是留在下拉框里让人白选。
+            if await self._check_login_required(page):
+                profile_manager.set_login_status(self.site.name, False, "发送时要求登录")
+                yield f"[ERROR:LOGIN_REQUIRED:{self.site.url}] {self.site.name} 发送时要求登录"
+                return
+
             response_sel = await self._find_selector(
                 page, "response", self.COMMON_RESPONSE_SELECTORS
             )
@@ -234,6 +242,15 @@ class GenericProvider:
             msg = str(e)
             trigger = ("发送失败" in msg) or ("发送按钮禁用" in msg)
             await self.limiter.record_failure(self.site.name, trigger_cooldown=trigger)
+            # 发送按钮禁用通常是游客态被要求登录 → 标记登录状态，
+            # 让 IDE 模型列表自动剔除该站点
+            if trigger:
+                try:
+                    page = await browser_manager.get_page(self.site.name)
+                    if await self._check_login_required(page):
+                        profile_manager.set_login_status(self.site.name, False, "发送按钮禁用，疑似需登录")
+                except Exception:
+                    pass
             console.print(f"[red]❌ 错误: {msg[:80]}[/red]")
             yield f"[ERROR] {msg}"
 
@@ -765,6 +782,12 @@ class GenericProvider:
         # 超时仍无内容：显式报错而不是静默返回空回复，
         # 让上层(Claude/验证器)能看到失败原因
         if not last_text.strip():
+            # 未捕获到回复常见于游客态被静默拦截（消息发出去了但要求登录）
+            try:
+                if await self._check_login_required(page):
+                    profile_manager.set_login_status(self.site.name, False, "无回复，疑似需登录")
+            except Exception:
+                pass
             console.print(f"[red]❌ {self.site.name} 等待 {max_wait}s 未捕获到回复[/red]")
             yield "[ERROR] 未捕获到回复(消息可能未发送成功/未生成/触发验证码，请检查站点页面)"
 
