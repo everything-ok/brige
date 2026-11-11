@@ -311,12 +311,24 @@ def write_config(ide, mcp_block, claude_code_block, base_url, api_key, models=No
     if ide["type"] == "mcp":
         existing.setdefault("mcpServers", {})["ai-bridge"] = mcp_block
     elif ide["type"] == "vscode":
-        models_list = [m for m in existing.get("continue.customModels", [])
-                       if m.get("title") != "Bridge"]
-        models_list.append(dict(title="Bridge", provider="openai",
-                                model=DEFAULT_MODEL,
-                                apiBase=f"{base_url}/v1", apiKey=api_key))
-        existing["continue.customModels"] = models_list
+        # Continue 2.x 只读 ~/.continue/config.yaml，不读 settings.json 的
+        # continue.customModels —— 旧写法会导致模型在下拉框里完全看不到。
+        try:
+            import model_catalog
+            import continue_config as cc
+
+            catalog = model_catalog.build_catalog(models)
+            entries = model_catalog.continue_models(catalog, api_key=api_key)
+            res = cc.write_continue_config(entries, set_default=True)
+            return res["path"], None
+        except Exception as e:
+            # 兜底：老版本 Continue 仍写 settings.json
+            models_list = [m for m in existing.get("continue.customModels", [])
+                           if m.get("title") != "Bridge"]
+            models_list.append(dict(title="Bridge", provider="openai",
+                                    model=DEFAULT_MODEL,
+                                    apiBase=f"{base_url}/v1", apiKey=api_key))
+            existing["continue.customModels"] = models_list
     elif ide["type"] == "zed":
         existing.pop("disable_ai", None)
         existing["restore_on_startup"] = "last_session"

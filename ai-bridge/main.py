@@ -27,7 +27,7 @@ from typing import List, Optional, AsyncGenerator, Union
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Header, Request
-from fastapi.responses import StreamingResponse, HTMLResponse
+from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from rich.console import Console
@@ -40,6 +40,8 @@ from security import SecurityManager
 from providers.generic import GenericProvider, Message, match_login_state
 from providers.validator import BridgeValidator
 from providers.model_fetcher import fetch_models_for_site
+import tool_emulation
+import model_catalog
 
 console = Console()
 
@@ -63,12 +65,18 @@ def get_provider(site_name: str) -> GenericProvider:
 
 class ChatMessage(BaseModel):
     role: str
-    content: Union[str, List[dict]]  # 兼容字符串和多模态数组格式
+    content: Optional[Union[str, List[dict]]] = None
+    # assistant 回合可能带 tool_calls（网页桥接无法原生处理，但需要保留上下文）
+    tool_calls: Optional[List[dict]] = None
+    # role="tool" 时工具名
+    name: Optional[str] = None
 
     def get_text(self) -> str:
         """统一提取文本内容"""
         if isinstance(self.content, str):
             return self.content
+        if self.content is None:
+            return ""
         # 多模态数组：提取所有 text 类型的内容拼接
         parts = [
             block.get("text", "")
@@ -83,6 +91,11 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     stream: bool = True
     site: Optional[str] = None
+    # OpenAI 兼容的工具定义（IDE 的 Agent 模式必需）
+    tools: Optional[List[dict]] = None
+    # 上一轮模型返回的 tool_calls；网页桥接无原生 tool call，
+    # 由 tool_emulation 模拟成文本再回灌，实现多轮工具循环
+    tool_results: Optional[List[dict]] = None
 
 
 # ── 模型暴露策略：每个已启用站点 = 一个模型，ID 即站点名 ──────
@@ -100,6 +113,46 @@ LOGIN_REQUIRED_SITES = {"poe", "perplexity", "you", "chatgpt", "kimi", "doubao",
 PHONE_REQUIRED_SITES = {"zai", "deepseek", "qwen", "tiangong", "yuanbao", "kimi", "doubao"}
 # 其余为邮箱登录站点（可在管理页配置邮箱+密码自动登录）
 EMAIL_LOGIN_SITES = LOGIN_REQUIRED_SITES - PHONE_REQUIRED_SITES
+
+# ── 模型用途标签（Zed 选择器显示简述，便于用户知道哪个模型适合做什么）──
+_MODEL_PURPOSE_TAGS = [
+    # OpenRouter 免费模型特征
+    ("lightning", "⚡最快"), ("ultra-550b", "质量最强"), ("super-vl", "视觉"),
+    ("nano-omni", "全模态推理"), ("content-safety", "审核勿用"),
+    ("north-mini", "代码"), ("coder", "代码"), ("inkling", "推理新秀"),
+    ("lyria", "音乐生成勿用"), ("gemma", "Google通用"), ("nemotron", "通用"),
+    ("flint", "轻量"), ("lfm", "端侧轻量"), ("xing", "中文"), ("dots", "笔记预览"),
+    ("openrouter/free", "官方免费路由"),
+    # 本地 Ollama 模型特征
+    ("abliterate", "无审查"), ("uncensored", "无审查"), ("dolphin", "无审查"),
+    ("deepseek-coder", "代码"), ("deepseek-r1", "推理链"), ("deepseek", "推理"),
+    ("qwen3", "通用中文"), ("qwen", "中文通用"), ("llama", "通用"), ("coder-v2", "代码"),
+]
+
+
+def _short_or(mid: str) -> str:
+    part = mid[3:] if mid.startswith("or/") else mid
+    part = part.split(":")[0].split("/")[-1]
+    toks = part.split("-")
+    return "-".join(toks[:2])[:18]
+
+
+def _purpose_tag(mid: str) -> str:
+    low = mid.lower()
+    for k, tag in _MODEL_PURPOSE_TAGS:
+        if k in low:
+            return tag
+    return ""
+
+
+def _display_for(mid: str, seen: dict) -> str:
+    """简写名 + 用途标签 + 同名去重编号"""
+    s = _short_or(mid)
+    seen[s] = seen.get(s, 0) + 1
+    if seen[s] > 1:
+        s = f"{s}·{seen[s]}"
+    tag = _purpose_tag(mid)
+    return f"{s}｜{tag}" if tag else s
 
 
 def get_site_model_ids() -> List[str]:
@@ -1349,21 +1402,12 @@ async def zed_refresh_models():
         return [{"name": n, "display_name": n, "max_tokens": 16384,
                  "supports_tools": False, "supports_images": False} for n in names]
 
-    def _short(mid):
-        part = mid[3:] if mid.startswith("or/") else mid
-        part = part.split(":")[0].split("/")[-1]
-        toks = part.split("-")
-        return "-".join(toks[:2])[:18]
-
-    # bridge 组：openrouter(auto链) + or/* 具体模型（简写名，所见即所得）
-    bridge_models = _zm(ready)
     seen = {}
+    # bridge 组：openrouter(auto链) + or/* 具体模型 + 本地模型（简写名+用途）
+    bridge_models = _zm(ready)
     for i in or_ids:
-        s = _short(i)
-        seen[s] = seen.get(s, 0) + 1
-        if seen[s] > 1:
-            s = f"{s}·{seen[s]}"
-        bridge_models.append({"name": i, "display_name": s, "max_tokens": 16384,
+        bridge_models.append({"name": i, "display_name": _display_for(i, seen),
+                              "max_tokens": 16384,
                               "supports_tools": False, "supports_images": False})
 
     d = json.load(open(p, encoding="utf-8"))
@@ -1547,10 +1591,19 @@ async def chat_completions(request: ChatRequest, authorization: Optional[str] = 
     # or/* 前缀 = OpenRouter 具体模型直通网关；local 前缀 = 本地 Ollama 模型直通网关
     # （Zed bridge 组的具体模型条目都走这条快速路径，无浏览器）
     rm = request.model or ""
-    if rm.startswith("or/") or rm.startswith("local"):
-        console.print(f"[cyan]📨 [gateway-proxy] {rm} stream={request.stream}[/cyan]")
-        openai_msgs = [{"role": m.role, "content": m.get_text()} for m in request.messages]
-        return await _gateway_proxy(openai_msgs, request.stream, requested_model=rm)
+    if rm.startswith("or/") or rm.startswith("local") or rm == "auto":
+        console.print(f"[cyan]📨 [gateway-proxy] {rm} stream={request.stream} "
+                     f"tools={len(request.tools or [])}[/cyan]")
+        openai_msgs = []
+        for m in request.messages:
+            d = {"role": m.role, "content": m.get_text()}
+            if m.tool_calls:
+                d["tool_calls"] = m.tool_calls
+            if m.name:
+                d["name"] = m.name
+            openai_msgs.append(d)
+        return await _gateway_proxy(openai_msgs, request.stream, requested_model=rm,
+                                    tools=request.tools)
 
     site_name, model_name = resolve_site_model(request.model)
     if not site_name:
@@ -1579,7 +1632,7 @@ async def chat_completions(request: ChatRequest, authorization: Optional[str] = 
         if not slim:
             slim = [{"role": "user", "content": "hello"}]
         console.print(f"[cyan]📨 [gateway-proxy] or-auto msgs={len(slim)} chars={sum(len(x['content']) for x in slim)} stream={request.stream}[/cyan]")
-        return await _gateway_proxy(slim, request.stream)
+        return await _gateway_proxy(slim, request.stream, tools=request.tools)
 
     # 网页桥接瘦身（与 anthropic 路径同策略）：IDE 会发来几万字上下文，
     # 网页逐字模拟输入撑不住 —— 丢弃 system 脚手架、单条截 2000、总长 6000
@@ -1588,8 +1641,16 @@ async def chat_completions(request: ChatRequest, authorization: Optional[str] = 
     for m in reversed(messages):
         if m.role == "system":
             continue
+        if m.role == "tool":
+            # 工具结果必须保留（否则多轮工具循环断链），但也限长
+            content = (m.content or "")[:MAX_MSG_CHARS]
+            slim.append(Message(role="tool", content=content, name=m.name))
+            total += len(content)
+            if total >= MAX_TOTAL_CHARS:
+                break
+            continue
         content = (m.content or "")[:MAX_MSG_CHARS]
-        slim.append(Message(role=m.role, content=content))
+        slim.append(Message(role=m.role, content=content, tool_calls=m.tool_calls))
         total += len(content)
         if total >= MAX_TOTAL_CHARS:
             break
@@ -1607,6 +1668,10 @@ async def chat_completions(request: ChatRequest, authorization: Optional[str] = 
 
     console.print(f"[cyan]📨 site={site_name} model={model_name} msgs={len(messages)} stream={request.stream}[/cyan]")
 
+    # ── 工具调用（网页站点无原生 function calling → 文本模拟）──────────
+    if request.tools:
+        return await _web_tool_chat(request, messages, model_name, site_name)
+
     if request.stream:
         return StreamingResponse(
             _stream_sse_with_fallback(messages, model_name, site_name, request.stream),
@@ -1616,14 +1681,110 @@ async def chat_completions(request: ChatRequest, authorization: Optional[str] = 
         return await _blocking_with_fallback(messages, model_name, site_name)
 
 
+async def _web_tool_chat(request: ChatRequest, messages, model_name, site_name):
+    """网页站点的工具调用：把 tools 注入 prompt，解析回复里的工具调用围栏。
+
+    流式：先正常流式输出文本，最后追加一个带 tool_calls 的 chunk（OpenAI 协议）。
+    非流式：返回 choices[0].message.tool_calls。
+    """
+    tools = request.tools or []
+    raw_msgs = []
+    for m in messages:
+        d = {"role": m.role, "content": m.content}
+        if getattr(m, "tool_calls", None):
+            d["tool_calls"] = m.tool_calls
+        if getattr(m, "name", None):
+            d["name"] = m.name
+        raw_msgs.append(d)
+
+    # 工具结果回灌：把 IDE 执行完的结果作为新的一轮消息继续
+    if request.tool_results:
+        for tr in request.tool_results:
+            fn = tr.get("function") or {}
+            content = tr.get("content")
+            if content is None:
+                content = json.dumps(tr.get("result") or {}, ensure_ascii=False)
+            raw_msgs.append({"role": "tool", "content": content,
+                             "name": fn.get("name", "")})
+            raw_msgs.append({
+                "role": "user",
+                "content": f"[工具 {fn.get('name', '')} 已执行，结果如上。请基于结果继续。]",
+            })
+
+    # 网页站点不认识 role="tool" / assistant.tool_calls → 转成可读文本
+    raw_msgs = tool_emulation.flatten_tool_messages(raw_msgs)
+    injected = tool_emulation.inject_tools(raw_msgs, tools)
+    msgs = [Message(role=m["role"], content=m["content"]) for m in injected]
+
+    if request.stream:
+        async def gen():
+            buf = []
+            async for chunk in _stream_sse_with_fallback(msgs, model_name, site_name, True):
+                # 收集文本用于后续解析（同时原样透传给客户端）
+                try:
+                    payload = chunk.decode("utf-8", errors="replace")
+                    if payload.startswith("data: ") and "[DONE]" not in payload:
+                        obj = json.loads(payload[6:].strip())
+                        content = (obj.get("choices") or [{}])[0].get("delta", {}).get("content")
+                        if content:
+                            buf.append(content)
+                except Exception:
+                    pass
+                yield chunk
+
+            # 已结束（[DONE]）→ 若模型输出了工具调用，追加一个 tool_calls chunk
+            text = "".join(buf)
+            _, call = tool_emulation.parse_tool_call(text, tools)
+            if call:
+                tc = tool_emulation.to_openai_tool_call(call)
+                data = {
+                    "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                    "object": "chat.completion.chunk",
+                    "created": int(time.time()),
+                    "model": f"{site_name}/{model_name}",
+                    "choices": [{"index": 0, "delta": {"tool_calls": [tc]},
+                                 "finish_reason": "tool_calls"}],
+                }
+                yield f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+                yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    # 非流式
+    site, model, text, error = await _try_with_fallback(msgs, model_name, site_name)
+    if error:
+        raise HTTPException(500, error)
+    cleaned, call = tool_emulation.parse_tool_call(text, tools)
+    msg = {"role": "assistant", "content": cleaned}
+    if call:
+        msg["tool_calls"] = [tool_emulation.to_openai_tool_call(call)]
+    return {
+        "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+        "object": "chat.completion",
+        "created": int(time.time()),
+        "model": f"{site}/{model}",
+        "choices": [{"index": 0, "message": msg,
+                     "finish_reason": "tool_calls" if call else "stop"}],
+        "usage": {
+            "prompt_tokens": sum(len(m.content) // 4 for m in msgs),
+            "completion_tokens": len(text) // 4,
+            "total_tokens": sum(len(m.content) // 4 for m in msgs) + len(text) // 4,
+        },
+    }
+
+
 GATEWAY_BASE = "http://127.0.0.1:8787"   # free-gateway（or/* 模型链）
 
 
-async def _gateway_proxy(openai_msgs: list, stream: bool, requested_model: str = "auto"):
+async def _gateway_proxy(openai_msgs: list, stream: bool, requested_model: str = "auto",
+                         tools: Optional[list] = None):
     """把 openrouter 请求转发到 free-gateway 并原样透传（流式或整块）
     requested_model: 'auto'（自动链）或 'or/<model>'（指定模型直通）"""
     import httpx
     payload = {"model": requested_model, "messages": openai_msgs, "stream": bool(stream)}
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"
     try:
         if stream:
             async def gen():
@@ -2487,13 +2648,10 @@ async def ide_configure(ide_key: str, project: Optional[str] = None):
                             for m in ready_models]
     seen = {}
     for i in _gids:
-        if not i.startswith("or/"):
+        if not i.startswith("or/") and not i.startswith("local"):
             continue
-        s = _short_or(i)
-        seen[s] = seen.get(s, 0) + 1
-        if seen[s] > 1:
-            s = f"{s}·{seen[s]}"
-        bridge_model_entries.append({"name": i, "display_name": s, "max_tokens": 16384,
+        disp = _display_for(i, seen)
+        bridge_model_entries.append({"name": i, "display_name": disp, "max_tokens": 16384,
                                      "supports_tools": False, "supports_images": False})
 
     # 默认模型 = openrouter（已验证可用的 API 代理链，快速稳定）
@@ -2595,6 +2753,9 @@ async def ide_configure(ide_key: str, project: Optional[str] = None):
         "apiBase": f"{base_url}/v1", "apiKey": api_key,
     }
 
+    continue_written = None      # Continue 2.x 的 ~/.continue/config.yaml 写入结果
+    continue_default = None
+
     for path in cfg["paths"]:
         if not path:
             continue
@@ -2611,9 +2772,31 @@ async def ide_configure(ide_key: str, project: Optional[str] = None):
             if cfg["type"] == "mcp":
                 existing.setdefault("mcpServers", {})["ai-bridge"] = mcp_block
             elif cfg["type"] == "vscode":
-                models_list = [m for m in existing.get("continue.customModels", []) if m.get("title") != "Bridge"]
-                models_list.append(continue_block)
+                # Continue 2.x 只读 ~/.continue/config.yaml，不看 settings.json；
+                # 写 settings.json 的 continue.customModels 是无效的（旧版本才行）。
+                # 这里两边都写：新版走 config.yaml，旧版兜底 settings.json。
+                site_models = get_site_model_ids() or [default_site_model()]
+                # 移除旧的 Bridge / 本地桥接 条目，避免重复写入
+                models_list = [
+                    m for m in existing.get("continue.customModels", [])
+                    if m.get("title") != "Bridge"
+                    and not m.get("title", "").startswith("本地桥接")
+                ]
+                # 为每个可用站点模型各写一条 Continue 配置（zai / doubao / qwen / …）
+                for m in site_models:
+                    models_list.append({
+                        "title": f"本地桥接 · {m}",
+                        "provider": "openai",
+                        "model": m,
+                        "apiBase": f"{base_url}/v1",
+                        "apiKey": api_key,
+                    })
                 existing["continue.customModels"] = models_list
+                # Claude Code 原生桥接：写入 VSCode 自己的 settings.json，
+                # 不触碰 ~/.claude/settings.json，不影响 Kiro 等其他 IDE。
+                existing["claude.code.baseUrl"] = f"{base_url}/v1"
+                existing["claude.code.apiKey"] = api_key
+                existing["claude.code.defaultModel"] = default_site_model()
             elif cfg["type"] == "zed":
                 # 移除可能存在的 disable_ai 设置
                 existing.pop("disable_ai", None)
@@ -2642,6 +2825,41 @@ async def ide_configure(ide_key: str, project: Optional[str] = None):
         except Exception as e:
             errors.append(f"{path}: {e}")
 
+    # ── VSCode: Continue 2.x 配置（~/.continue/config.yaml）─────────
+    # Continue 2.x 完全不读 settings.json 的 continue.customModels，
+    # 必须写 ~/.continue/config.yaml 才能在模型下拉框里看到桥接模型。
+    if cfg["type"] == "vscode":
+        try:
+            import continue_config as cc
+
+            # 统一目录：bridge 站点 + openrouter 免费模型 + 本地 Ollama + auto 链
+            catalog = model_catalog.build_catalog(get_site_model_ids())
+            entries = model_catalog.continue_models(catalog, api_key=api_key)
+
+            # 默认模型优先 openrouter（免登录、API 直连、稳定），
+            # 否则取第一个 bridge 站点
+            default_entry = None
+            for item in catalog:
+                if item.get("group") == "openrouter":
+                    default_entry = next(
+                        (e for e in entries if e["name"] == item["title"]), None)
+                    break
+            if default_entry is None and entries:
+                default_entry = entries[0]
+
+            res = cc.write_continue_config(
+                entries,
+                set_default=True,
+                default_title=default_entry["name"] if default_entry else None,
+            )
+            continue_written = res
+            continue_default = res.get("default")
+            console.print(f"[green]✅ Continue 配置已写入: {res['path']}"
+                         f"（{res['added']} 个模型，默认 {res.get('default')}）[/green]")
+        except Exception as e:
+            errors.append(f"Continue config.yaml: {e}")
+            console.print(f"[red]❌ Continue 配置写入失败: {e}[/red]")
+
     # ── Claude Code 桥接说明（不写全局文件）─────────────────────
     # ~/.claude.json 与 ~/.claude/settings.json 是用户级全局文件，
     # 会被 Kiro 等其他 IDE 的 Claude 共用；桥接只针对 VSCode 时，
@@ -2650,9 +2868,13 @@ async def ide_configure(ide_key: str, project: Optional[str] = None):
     extra_configs = []
     if cfg.get("extra") == "claude_code":
         vscode_env = {
+            "CLAUDE_CONFIG_DIR": os.path.join(home, ".claude-bridge"),
             "ANTHROPIC_BASE_URL": base_url,
             "ANTHROPIC_AUTH_TOKEN": api_key,
             "ANTHROPIC_MODEL": default_site_model(),
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": default_site_model(),
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": default_site_model(),
+            "ANTHROPIC_SMALL_FAST_MODEL": default_site_model(),
         }
         extra_configs.append({
             "label": "Claude Code 桥接（仅 VSCode 实例，不影响 Kiro 等其他 IDE）",
@@ -2670,9 +2892,24 @@ async def ide_configure(ide_key: str, project: Optional[str] = None):
     manual = manual_map[cfg["type"]]
 
     if written:
-        # 写入 IDE 所需的环境变量（如 Zed 需要 BRIDGE_API_KEY）
-        env_vars = cfg.get("env_vars", {})
-        if env_vars:
+        # 构建 IDE 启动环境变量
+        env_vars = dict(cfg.get("env_vars", {}))
+        if ide_key == "code":
+            # VSCode：Claude Code 桥接环境变量随进程注入，仅对该 VSCode 实例生效，
+            # 不写入注册表，避免影响 Kiro 等其他 IDE 的 Claude；不使用 CLAUDE_CONFIG_DIR
+            # 会污染全局 ~/.claude，这里指向独立目录保持隔离。
+            env_vars.update({
+                "CLAUDE_CONFIG_DIR": os.path.join(home, ".claude-bridge"),
+                "ANTHROPIC_BASE_URL": base_url,
+                "ANTHROPIC_AUTH_TOKEN": api_key,
+                "ANTHROPIC_MODEL": default_site_model(),
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": default_site_model(),
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": default_site_model(),
+                "ANTHROPIC_SMALL_FAST_MODEL": default_site_model(),
+            })
+
+        if env_vars and ide_key != "code":
+            # Zed 等需要写入注册表的 IDE，持久化环境变量
             import winreg, ctypes
             try:
                 key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE)
@@ -2684,13 +2921,32 @@ async def ide_configure(ide_key: str, project: Optional[str] = None):
             except Exception:
                 pass  # 非 Windows 或权限不足时忽略
 
-        # 自动重启对应 IDE
-        restarted = await _restart_ide(ide_key, env_vars=env_vars, project_path=project)
-        msg = "已合并写入，配置已生效" if restarted else "已合并写入，请手动重启 IDE 后生效"
+        # 自动重启对应 IDE（VSCode 会随进程注入桥接环境变量）
+        restarted = False
+        if ide_key == "code":
+            # VSCode：完全退出再启动 —— Continue 2.x 的 config.yaml 只在扩展
+            # 激活时读取，普通窗口重载不保证刷新；彻底退出最稳。
+            import continue_config as cc
+            r = await asyncio.get_event_loop().run_in_executor(
+                None, lambda: cc.restart_vscode(extra_env=env_vars))
+            restarted = bool(r.get("ok"))
+            if not restarted:
+                console.print(f"[yellow]⚠️ VSCode 自动重启失败: {r.get('reason')}[/yellow]")
+        else:
+            restarted = await _restart_ide(ide_key, env_vars=env_vars, project_path=project)
+
+        if ide_key == "code":
+            msg = ("VSCode 配置已写入，正在完全重启 VSCode，重启后 Continue 模型下拉框"
+                   "即可选择桥接模型") if restarted else \
+                  "VSCode 配置已写入，请手动完全退出并重开 VSCode 后生效"
+        else:
+            msg = "已合并写入，配置已生效" if restarted else "已合并写入，请手动重启 IDE 后生效"
         return {
             "success": True, "ide": ide_key, "written": written,
             "base_url": base_url, "extra_configs": extra_configs,
             "restarted": restarted, "message": msg,
+            "continue_config": continue_written,
+            "continue_default": continue_default,
         }
     else:
         return {
