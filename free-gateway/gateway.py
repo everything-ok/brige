@@ -69,6 +69,75 @@ def _save_local_models(models: dict):
 
 LOCAL_MODELS = _load_local_models()
 
+
+def _ollama_installed() -> dict:
+    """本机 Ollama 已安装的模型：tag -> {size_mb}
+    用于把 local_models.json 里的过期映射纠正成实际存在的 tag。
+    """
+    try:
+        import httpx
+        r = httpx.get(f"{OLLAMA_BASE}/api/tags", timeout=5)
+        out = {}
+        for m in r.json().get("models", []):
+            name = m.get("name") or ""
+            if name:
+                out[name] = m
+        return out
+    except Exception:
+        return {}
+
+
+def _resolve_local_tag(real_model: str, installed: dict) -> str:
+    """把配置的模型名映射到本机实际存在的 tag。
+
+    例：配置写的是 qwen3t4:latest，但本机装的是 qwen3:4b
+    → 通过去掉 :latest 后按前缀/体积匹配找到真实 tag。
+    """
+    if not installed:
+        return real_model
+    if real_model in installed:
+        return real_model
+
+    base = real_model.split(":")[0]
+    # 1) 同名不同 tag（如 qwen3:4b vs qwen3:latest）
+    for tag in installed:
+        if tag.split(":")[0] == base:
+            return tag
+    # 2) 名称里含 base 的候选（如 qwen3t4 → qwen3:4b 的数字匹配）
+    digits = "".join(ch for ch in base if ch.isdigit())
+    if digits:
+        cands = [t for t in installed if digits in t.replace(":", "").replace("-", "")]
+        if len(cands) == 1:
+            return cands[0]
+    return real_model
+
+
+def _sync_local_models() -> None:
+    """启动时校正本地模型映射：把不存在的 tag 换成实际安装的 tag。
+
+    避免用户在 IDE 里选了 local 模型却得到 404（表现为"模型没生效"）。
+    """
+    installed = _ollama_installed()
+    if not installed:
+        return
+    changed = False
+    for key, real in list(LOCAL_MODELS.items()):
+        if real in installed:
+            continue
+        resolved = _resolve_local_tag(real, installed)
+        if resolved != real and resolved in installed:
+            LOCAL_MODELS[key] = resolved
+            changed = True
+            print(f"[gateway] 本地模型映射已校正: {key} {real} -> {resolved}")
+    if changed:
+        try:
+            _save_local_models(LOCAL_MODELS)
+        except Exception:
+            pass
+
+
+_sync_local_models()
+
 # 高质量 Ollama 推荐目录（管理页"无限制"区展示，均适配 16GB 内存 CPU 推理）
 CURATED_OLLAMA = [
     # min_ram_gb = 流畅运行所需内存（GB），用于按设备推荐
@@ -293,10 +362,10 @@ async def last_served_info():
     return r
 
 
-# ── 上游流式调用：统一产出 OpenAI 兼容 SSE 文本 ──────────────────
-async def _stream_llm7(real_model: str, body: dict) -> AsyncGenerator[bytes, None]:
+# ── 上游流式调用：统一产出 ("text", str) / ("tool_calls", list) ────
+async def _stream_llm7(real_model: str, body: dict) -> AsyncGenerator[tuple, None]:
     payload = {k: v for k, v in body.items() if k in
-               ("messages", "temperature", "max_tokens", "top_p")}
+               ("messages", "temperature", "max_tokens", "top_p", "tools", "tool_choice")}
     payload["model"] = real_model
     payload["stream"] = True
     async with httpx.AsyncClient(timeout=180) as cli:
@@ -312,19 +381,31 @@ async def _stream_llm7(real_model: str, body: dict) -> AsyncGenerator[bytes, Non
                         break
                     try:
                         obj = json.loads(chunk)
-                        delta = obj["choices"][0].get("delta", {}).get("content")
+                        delta = obj["choices"][0].get("delta", {})
                     except Exception:
                         continue
-                    if delta:
-                        yield delta
+                    content = delta.get("content")
+                    if content:
+                        yield ("text", content)
+                    tcs = delta.get("tool_calls")
+                    if tcs:
+                        yield ("tool_calls", tcs)
 
 
-async def _stream_ollama(real_model: str, body: dict) -> AsyncGenerator[bytes, None]:
+async def _stream_ollama(real_model: str, body: dict) -> AsyncGenerator[tuple, None]:
+    # keep_alive: 模型驻留内存 30 分钟 —— 低内存设备上重复使用同一模型
+    # 不会反复冷加载（切换模型时上一个自动换出，不占双份内存）
     payload = {"model": real_model, "messages": body.get("messages", []),
-               "stream": True}
-    prompt = "".join(m.get("content", "") for m in payload["messages"])
+               "stream": True, "keep_alive": "30m"}
+    # Ollama 原生支持 tools（格式与 OpenAI 一致）
+    if body.get("tools"):
+        payload["tools"] = body["tools"]
     async with httpx.AsyncClient(timeout=300) as cli:
         async with cli.stream("POST", f"{OLLAMA_BASE}/api/chat", json=payload) as r:
+            if r.status_code == 404:
+                # 模型名与本机已安装的 tag 不一致 → 给出可操作的提示
+                detail = (await r.aread()).decode(errors="replace")[:200]
+                raise RuntimeError(f"ollama 模型不存在: {real_model}（{detail}）")
             if r.status_code != 200:
                 raise RuntimeError(f"ollama {r.status_code}")
             async for line in r.aiter_lines():
@@ -334,16 +415,37 @@ async def _stream_ollama(real_model: str, body: dict) -> AsyncGenerator[bytes, N
                     obj = json.loads(line)
                 except Exception:
                     continue
-                delta = obj.get("message", {}).get("content", "")
+                msg = obj.get("message", {})
+                delta = msg.get("content", "")
                 if delta:
-                    yield delta
+                    yield ("text", delta)
+                tcs = msg.get("tool_calls")
+                if tcs:
+                    # Ollama 的 tool_calls 用 {function: {name, arguments}} 结构，
+                    # 需补上 OpenAI 要求的 id / type
+                    norm = []
+                    for i, tc in enumerate(tcs):
+                        fn = tc.get("function", {})
+                        norm.append({
+                            "id": tc.get("id") or f"call_{i}_{abs(hash(fn.get('name',''))) % 100000}",
+                            "type": "function",
+                            "function": {
+                                "name": fn.get("name", ""),
+                                "arguments": fn.get("arguments")
+                                if isinstance(fn.get("arguments"), str)
+                                else json.dumps(fn.get("arguments") or {}, ensure_ascii=False),
+                            },
+                        })
+                    yield ("tool_calls", norm)
                 if obj.get("done"):
                     break
 
 
-async def _stream_bridge(model_name: str, body: dict) -> AsyncGenerator[bytes, None]:
+async def _stream_bridge(model_name: str, body: dict) -> AsyncGenerator[tuple, None]:
     payload = {"model": model_name, "messages": body.get("messages", []),
                "stream": True}
+    if body.get("tools"):
+        payload["tools"] = body["tools"]
     async with httpx.AsyncClient(timeout=600) as cli:
         async with cli.stream("POST", f"{BRIDGE_BASE}/v1/chat/completions",
                               json=payload) as r:
@@ -357,16 +459,20 @@ async def _stream_bridge(model_name: str, body: dict) -> AsyncGenerator[bytes, N
                     break
                 try:
                     obj = json.loads(chunk)
-                    delta = obj["choices"][0].get("delta", {}).get("content")
+                    delta = obj["choices"][0].get("delta", {})
                 except Exception:
                     continue
-                if delta:
-                    yield delta
+                content = delta.get("content")
+                if content:
+                    yield ("text", content)
+                tcs = delta.get("tool_calls")
+                if tcs:
+                    yield ("tool_calls", tcs)
 
 
-async def _stream_openrouter(real_model: str, body: dict) -> AsyncGenerator[bytes, None]:
+async def _stream_openrouter(real_model: str, body: dict) -> AsyncGenerator[tuple, None]:
     payload = {k: v for k, v in body.items() if k in
-               ("messages", "temperature", "max_tokens", "top_p")}
+               ("messages", "temperature", "max_tokens", "top_p", "tools", "tool_choice")}
     payload["model"] = real_model
     payload["stream"] = True
     async with httpx.AsyncClient(timeout=180) as cli:
@@ -383,17 +489,30 @@ async def _stream_openrouter(real_model: str, body: dict) -> AsyncGenerator[byte
                         break
                     try:
                         obj = json.loads(chunk)
-                        delta = obj["choices"][0].get("delta", {}).get("content")
+                        delta = obj["choices"][0].get("delta", {})
                     except Exception:
                         continue
-                    if delta:
-                        yield delta
+                    content = delta.get("content")
+                    if content:
+                        yield ("text", content)
+                    tcs = delta.get("tool_calls")
+                    if tcs:
+                        yield ("tool_calls", tcs)
 
 
 def _sse_chunk(text: str, model: str = None) -> bytes:
     data = {"id": "gw-chatcmpl", "object": "chat.completion.chunk", "created": int(time.time()),
             "model": model or "auto",
             "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]}
+    return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+
+
+def _sse_tool_calls(tool_calls: list, model: str = None) -> bytes:
+    """工具调用 chunk（OpenAI 协议）"""
+    data = {"id": "gw-chatcmpl", "object": "chat.completion.chunk", "created": int(time.time()),
+            "model": model or "auto",
+            "choices": [{"index": 0, "delta": {"tool_calls": tool_calls},
+                         "finish_reason": "tool_calls"}]}
     return f"data: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
 
 
@@ -408,6 +527,8 @@ async def chat(request: Request):
     body = await request.json()
     model = (body.get("model") or "auto").strip()
     catalog = _model_catalog()
+    # 工具定义（IDE Agent 模式必需），原样透传给支持 tool call 的后端
+    tools = body.get("tools") or None
 
     if model.startswith("or/") and OPENROUTER_KEY:
         # or/<model> 前缀直通 OpenRouter（模型 id 透传，无需登记）
@@ -419,7 +540,12 @@ async def chat(request: Request):
         backend, real = "auto", "auto"
 
     async def gen() -> AsyncGenerator[bytes, None]:
-        candidates = AUTO_CHAIN if backend == "auto" else [(backend, real)]
+        # or/<model> 直通 OpenRouter：一旦上游失败（429 配额耗尽 / 401 / 5xx），
+        # 自动降级到 auto 链，避免客户端直接拿到"所有后端失败"。
+        if backend == "openrouter":
+            candidates = [("openrouter", real)] + AUTO_CHAIN
+        else:
+            candidates = AUTO_CHAIN if backend == "auto" else [(backend, real)]
         last_err = None
         served = None            # 实际服务的模型（auto 链解析后）
         for bk, rl in candidates:
@@ -427,12 +553,15 @@ async def chat(request: Request):
                 got = False
                 stream_fn = {"llm7": _stream_llm7, "ollama": _stream_ollama,
                              "bridge": _stream_bridge, "openrouter": _stream_openrouter}[bk]
-                async for piece in stream_fn(rl, body):
+                async for kind, payload in stream_fn(rl, body):
                     if not got:
                         got = True
                         served = f"{bk}/{rl}"
                         _last_served.update(requested=model, served=served, ts=time.time())
-                    yield _sse_chunk(piece, served)
+                    if kind == "text":
+                        yield _sse_chunk(payload, served)
+                    elif kind == "tool_calls":
+                        yield _sse_tool_calls(payload, served)
                 if got:
                     yield _sse_done()
                     return
@@ -444,28 +573,85 @@ async def chat(request: Request):
         yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n".encode()
         yield b"data: [DONE]\n\n"
 
+    served_model = None
+
+    async def gen_tracked() -> AsyncGenerator[bytes, None]:
+        """包装 gen()，记录本次实际服务的模型（避免读到上一次的全局值）"""
+        nonlocal served_model
+        async for piece in gen():
+            served_model = _last_served.get("served")
+            yield piece
+
     is_stream = bool(body.get("stream", False))
     if is_stream:
-        return StreamingResponse(gen(), media_type="text/event-stream")
+        return StreamingResponse(gen_tracked(), media_type="text/event-stream")
     # 非流式：聚合后一次性返回
     parts = []
+    tool_calls = []
+    error_msg = None
 
     async def collect():
-        async for piece in gen():
+        nonlocal tool_calls, error_msg
+        async for piece in gen_tracked():
             try:
                 obj = json.loads(piece.decode().removeprefix("data: ").strip())
-                delta = obj["choices"][0].get("delta", {}).get("content")
-                if delta:
-                    parts.append(delta)
             except Exception:
-                pass
+                continue
+            # 上游全部失败时 gen() 会吐一个 error chunk —— 必须冒泡，
+            # 否则客户端只会收到一个空回复（"模型没生效"的假象）
+            if "error" in obj:
+                error_msg = (obj["error"] or {}).get("message") or "上游请求失败"
+                continue
+            delta = (obj.get("choices") or [{}])[0].get("delta", {})
+            if delta.get("content"):
+                parts.append(delta["content"])
+            if delta.get("tool_calls"):
+                tool_calls.extend(delta["tool_calls"])
+
     await collect()
+    if error_msg and not parts and not tool_calls:
+        raise HTTPException(502, error_msg)
     text = "".join(parts)
+    msg = {"role": "assistant", "content": text}
+    finish = "stop"
+    if tool_calls:
+        # 上游（OpenRouter/Ollama）是分片流式下发 tool_calls：
+        #   第 1 片带 id/name，后面的片只带 arguments 的片段。
+        # 直接 extend 会得到一串"半截调用"，客户端解析必然失败
+        # （表现为模型不调用工具 / 报 malformed tool-call）。
+        # 这里按 index 合并成一条完整调用。
+        merged = []
+        by_index = {}
+        for tc in tool_calls:
+            idx = tc.get("index", 0)
+            cur = by_index.get(idx)
+            if cur is None:
+                cur = {"index": idx, "id": "", "type": "function",
+                       "function": {"name": "", "arguments": ""}}
+                by_index[idx] = cur
+                merged.append(cur)
+            if tc.get("id"):
+                cur["id"] = tc["id"]
+            if tc.get("type"):
+                cur["type"] = tc["type"]
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                cur["function"]["name"] = fn["name"]
+            if fn.get("arguments"):
+                cur["function"]["arguments"] += fn["arguments"]
+        # arguments 可能是 dict（部分后端）或字符串，统一成 JSON 字符串
+        for cur in merged:
+            args = cur["function"]["arguments"]
+            if not isinstance(args, str):
+                cur["function"]["arguments"] = json.dumps(args, ensure_ascii=False)
+            elif args.strip() == "":
+                cur["function"]["arguments"] = "{}"
+        msg["tool_calls"] = merged
+        finish = "tool_calls"
     return JSONResponse({
         "id": "gw-chatcmpl", "object": "chat.completion", "created": int(time.time()),
-        "model": _last_served.get("served") or model,
-        "choices": [{"index": 0, "message": {"role": "assistant", "content": text},
-                     "finish_reason": "stop"}],
+        "model": served_model or model,
+        "choices": [{"index": 0, "message": msg, "finish_reason": finish}],
         "usage": {"prompt_tokens": 0, "completion_tokens": len(text) // 4, "total_tokens": len(text) // 4},
     })
 
