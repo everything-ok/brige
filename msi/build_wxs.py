@@ -33,6 +33,8 @@ NAMESPACE = uuid.UUID("6f1d5a3e-9c2b-4e77-8a44-2b0e9f7c1d55")
 
 SKIP_DIR_NAMES = {"__pycache__", ".pytest_cache"}
 SKIP_EXT = {".pyc", ".pyo", ".wixpdb", ".msi"}
+# 运行期误建目录（IDE 沙箱把 %USERPROFILE% 当字面量展开），非源码
+SKIP_DIR_PREFIX = ("%USERPROFILE%", "%TEMP%", "AppData")
 
 # 固定 ID（非文件组件）
 MENU_SHORTCUT_GUID = "B2C3D4E5-2222-4B3C-9D4E-6F7A8B9C0D1E"
@@ -46,6 +48,8 @@ def list_payload() -> list[Path]:
             continue
         rel = p.relative_to(PAYLOAD)
         if any(part in SKIP_DIR_NAMES for part in rel.parts):
+            continue
+        if rel.parts and rel.parts[0].startswith(SKIP_DIR_PREFIX):
             continue
         if p.suffix.lower() in SKIP_EXT:
             continue

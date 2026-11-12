@@ -269,6 +269,41 @@ python live_e2e.py                          # 57 passed
 
 ---
 
+## 安装包（MSI）
+
+Windows 用户可直接下载安装包，无需手动配置 Python 环境：
+
+👉 <https://github.com/everything-ok/brige/releases/latest> 下载 `AI-Bridge-<版本>.msi`
+
+安装位置：`%LOCALAPPDATA%\AI 模型桥接`（per-user 安装，**不需要管理员权限**）。
+安装后桌面与开始菜单会生成「AI 模型桥接」快捷方式，双击即一键拉起
+`free-gateway`(8787) + `ai-bridge`(18792) 并打开管理页。
+
+全新机器若没有 Python，程序会先弹出 `setup_runtime.bat` 引导装运行时（需联网）。
+
+### 自行构建 MSI
+
+需要 [WiX Toolset v4+](https://wixtoolset.org/)（`wix build`）与 PyInstaller：
+
+```bash
+# 1. 同步 payload（ai-bridge / free-gateway 最新源码）
+python msi/sync_payload.py
+
+# 2. 重新打包桌面启动器 EXE
+python -m PyInstaller --noconfirm --clean "AI模型桥接.spec"
+cp "dist/AI模型桥接.exe" msi/payload/
+
+# 3. 按 payload 实际内容生成 WXS（目录树/GUID 自动推导，历史 GUID 沿用）
+python msi/build_wxs.py
+
+# 4. 编译安装包
+cd msi && wix build bridge.wxs -o "AI模型桥接-1.1.0.msi" -arch x64
+```
+
+`msi/build_wxs.py --check` 可校验 WXS 与 payload 是否一致（CI 友好）。
+
+---
+
 ## 项目结构
 
 ```
