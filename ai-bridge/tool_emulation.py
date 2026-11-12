@@ -32,6 +32,12 @@ _FENCE_JSON_RE = re.compile(
     re.DOTALL | re.IGNORECASE,
 )
 
+# 小模型有时写成 ```JSON（大小写混合）或 ```JSON Object 前缀 → 放宽匹配
+_FENCE_JSON_LOOSE_RE = re.compile(
+    r"```\s*json(?:[ \t]+object)?[ \t\r\n]*(\{.*?\})\s*```",
+    re.DOTALL | re.IGNORECASE,
+)
+
 
 def render_tool_instructions(tools: List[dict]) -> str:
     """把 tools[] 渲染成给模型看的说明文本"""
@@ -145,7 +151,7 @@ def _collect_fence(text: str) -> Optional[dict]:
     """从文本中提取第一个工具调用 JSON 对象"""
     if not text:
         return None
-    for rx in (_FENCE_RE, _FENCE_JSON_RE):
+    for rx in (_FENCE_RE, _FENCE_JSON_RE, _FENCE_JSON_LOOSE_RE):
         for m in rx.finditer(text):
             raw = m.group(1).strip()
             try:

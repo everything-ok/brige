@@ -555,8 +555,14 @@ async def _stream_ollama_text_tools(real_model: str, body: dict,
 
     payload = {"model": real_model, "messages": msgs, "stream": True, "keep_alive": "30m"}
     text_parts = []
-    fence_re = re.compile(r"```(?:tool_call|tool-call|toolcall)?\s*(\{.*?\})\s*```",
-                          re.DOTALL | re.IGNORECASE)
+    # 围栏格式多样：```tool_call / ```tool-call / ```toolcall / ```json / ```（裸）
+    # 小模型常写成 ```json {...} ```，必须一并识别，否则工具调用会漏成普通文本
+    fence_res = [
+        re.compile(r"```(?:tool_call|tool-call|toolcall)\s*(\{.*?\})\s*```",
+                   re.DOTALL | re.IGNORECASE),
+        re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE),
+        re.compile(r"```\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE),
+    ]
 
     async with httpx.AsyncClient(timeout=300) as cli:
         async with cli.stream("POST", f"{OLLAMA_BASE}/api/chat", json=payload) as r:
@@ -579,12 +585,22 @@ async def _stream_ollama_text_tools(real_model: str, body: dict,
         return
 
     call = None
-    m = fence_re.search(text)
-    if m:
+    for rx in fence_res:
+        m = rx.search(text)
+        if not m:
+            continue
+        raw = m.group(1).strip()
         try:
-            call = json.loads(m.group(1).strip())
+            obj = json.loads(raw)
         except Exception:
-            call = None
+            # 修掉尾逗号等常见小毛病
+            try:
+                obj = json.loads(re.sub(r",\s*([}\]])", r"\1", raw))
+            except Exception:
+                continue
+        if isinstance(obj, dict) and obj.get("name"):
+            call = obj
+            break
     if call is None:
         # 小模型经常不写围栏，直接输出裸 JSON → 兜底解析
         stripped = text.strip()
