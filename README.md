@@ -200,6 +200,7 @@ curl http://127.0.0.1:18792/login/batch/status
 | API Key | 设置 `API_KEY` 后**全部**接口（不只是 `/v1/*`）都需鉴权。三种凭据来源任选其一：`Authorization: Bearer <key>`、`X-API-Key: <key>`、Cookie `bridge_admin_key`（管理页输入 Key 后自动下发，HttpOnly + SameSite=Strict） |
 | 管理页鉴权 | 配了 `API_KEY` 后 `GET /` 也会返回 401 并渲染"输入 API Key"页面；解锁后页面内的 fetch 会自动带上 `X-API-Key` |
 | 路由级鉴权 | 鉴权以 FastAPI **依赖**形式挂在路由上，而不是写在 handler 第一行 —— 后者会被请求体校验（422）抢先返回，等于绕过 |
+| 数据面隔离 | `/v1/*`（`require_api_key`）**只认请求头**（`Authorization` / `X-API-Key`），**不认管理页 Cookie**；管理面（`require_key`）才认 Cookie。避免一个被诱导打开管理页的浏览器替攻击者调用数据面 |
 | CORS | 对外监听 + 有 Key 时关闭任意来源跨域 |
 | XSS | 管理页所有动态字段（`sites.yaml` 的 name/url/模型名、网关返回的 label/id/备注）均做 HTML 转义；放进 JS 字符串的额外转义引号与反斜杠 |
 | YAML 注入 | `POST /sites/add` 严格校验：站点名限 `^[a-z0-9][a-z0-9_-]{0,63}$`，URL 必须 http/https 且不含引号/尖括号/换行 |
@@ -209,6 +210,14 @@ curl http://127.0.0.1:18792/login/batch/status
 | 模型 ID 校验 | 网关 `POST /local-models/add` 的模型名限 `^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$`，且不允许与内置模型（`auto` / `llm7-*` / `or/*`）撞名 |
 | 工具白名单 | 模型输出的工具名必须在请求的 `tools[]` 内，否则降级为普通文本 |
 | 限流原子性 | `acquire(reserve=True)` 把「检查」与「占用」合并为一步，并发请求不会突破限额；配额用唯一 token 记账，失败释放不会偷走别的并发请求的槽位 |
+
+### 稳定性
+
+| 项 | 行为 |
+|----|------|
+| 本地模型准入控制 | Ollama 在无 GPU 机器上是 CPU 推理（单次 30~60s），llama.cpp 一次只跑一个请求。网关对本地模型做**准入控制**：在途上限 `OLLAMA_MAX_CONCURRENCY`（默认 4）+ 有界等待队列 `OLLAMA_MAX_QUEUE`（默认 8）+ 最长等待 `OLLAMA_MAX_WAIT`（默认 120s）。超出则返回 **429 + `Retry-After`**（可重试），而不是无限堆积到客户端超时 |
+| 429 透传 | 网关返回 429 时，ai-bridge 的非流式透传状态码、流式路径输出 `gateway_busy` 错误帧 —— 不会被伪装成"正常回复" |
+| 网关↔桥接 Key 同步 | 网关与桥接是两个 `.env`。网关会同时读取自己的 `.env` 与 `ai-bridge/.env` 的 `API_KEY` 作为候选，401 时自动换下一个候选重试，避免"改了桥接的 Key，网关全 401" |
 
 ### API Key 使用
 
@@ -222,7 +231,7 @@ API_KEY=<随机长字符串>
 | IDE / 脚本 | `Authorization: Bearer <key>` |
 | 浏览器 fetch | `X-API-Key: <key>` |
 | 管理页 | 打开 `http://127.0.0.1:18792/` 会要求输入 Key，输入后自动记住 |
-| free-gateway → ai-bridge | 网关自动读取同一个 `.env` 的 `API_KEY`（或 `BRIDGE_API_KEY`）并带上 |
+| free-gateway → ai-bridge | 网关自动读取 `API_KEY`（或 `BRIDGE_API_KEY`），并回退读取 `ai-bridge/.env` |
 
 未配置 `API_KEY` 时（本机自用的默认场景）**一切照旧，不加任何限制**。
 
@@ -232,8 +241,8 @@ API_KEY=<随机长字符串>
 
 ```bash
 # 单元 + 集成测试
-cd ai-bridge    && python -m pytest -q     # 212 passed
-cd free-gateway && python -m pytest -q     #  49 passed
+cd ai-bridge    && python -m pytest -q     # 217 passed
+cd free-gateway && python -m pytest -q     #  62 passed
 
 # 真实服务端到端测试（需先启动两个服务）
 python live_e2e.py                          # 57 passed
@@ -252,8 +261,8 @@ python live_e2e.py                          # 57 passed
 | `ai-bridge/tests/test_config.py` | 配置加载、**热重载语义**（重载不得翻倍） |
 | `ai-bridge/tests/test_profile.py` | profile 元数据损坏恢复、原子写、路径穿越 |
 | `ai-bridge/tests/test_rate_limiter*.py` | 限流边界与**并发抢占**、配额 token 配对 |
-| `ai-bridge/tests/test_security_regressions.py` | XSS / YAML 注入 / 鉴权绕过 / 路由冲突 / 并发写 / 上下文裁剪 |
-| `free-gateway/tests/test_gateway.py` | 工具调用围栏解析（含名值形式）、消息拍平、模型 ID 校验 |
+| `ai-bridge/tests/test_security_regressions.py` | XSS / YAML 注入 / 鉴权绕过（含**请求体校验抢跑**）/ 路由冲突 / 并发写 / 上下文裁剪 |
+| `free-gateway/tests/test_gateway.py` | 工具调用围栏解析（含名值形式）、消息拍平、模型 ID 校验、**本地模型准入控制**、网关↔桥接 Key 候选 |
 
 > 注意：涉及写文件的测试必须把 `sites.yaml` / IDE 配置指向临时目录。
 > 项目里已用 `tmp_sites_yaml` fixture 隔离，避免测试污染开发机。
@@ -298,5 +307,7 @@ live_e2e.py             真实服务端到端测试
 - 不支持原生 tools 的小模型靠文本模拟，工具调用准确率取决于模型能力。
 - `cdp` 浏览器模式在 Chrome 151+ 已失效（默认用户数据目录禁止开调试端口），
   请用 `profile` 模式。
+- 本机若无 GPU，Ollama 是 CPU 推理，单次本地推理可能 30~60s；
+  并发请求会排队，超过准入上限返回 429（客户端需自行重试）。
 - 兼容性主要在 Windows / Python 3.14 / Chromium 上验证；
   macOS、Linux 未实测（代码本身无平台专属逻辑）。

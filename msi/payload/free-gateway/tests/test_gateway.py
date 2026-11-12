@@ -347,3 +347,270 @@ def test_local_models_add_rejects_invalid_json():
     resp = client.post("/local-models/add", content=b"{not json",
                        headers={"Content-Type": "application/json"})
     assert resp.status_code == 400
+
+
+# ── 网关 → 桥接 的鉴权 Key 同步 ───────────────────────────────
+#
+# 网关与桥接是两个进程、两个 .env 文件。管理员改了 ai-bridge/.env 的
+# API_KEY 后，网关的 .env 没同步 → 网关回调桥接被 401，
+# 表现为"本地模型正常、一走网页站点就失败"。
+
+def test_read_env_key_reads_bridge_env(tmp_path):
+    """网关必须能读到 ai-bridge/.env 里的 API_KEY"""
+    import gateway
+    bridge_env = tmp_path / "ai-bridge" / ".env"
+    bridge_env.parent.mkdir(parents=True)
+    bridge_env.write_text("# c\nAPI_KEY=bridge-secret\n", encoding="utf-8")
+    gw_env = tmp_path / "free-gateway" / ".env"
+    gw_env.parent.mkdir(parents=True)
+    gw_env.write_text("GATEWAY_PORT=8787\n", encoding="utf-8")
+
+    assert gateway._read_env_key("API_KEY", base_dir=gw_env.parent) == "bridge-secret"
+    assert gateway._read_env_key("NOT_THERE", base_dir=gw_env.parent) == ""
+
+
+def test_read_env_key_skips_comments_and_quotes(tmp_path):
+    """注释行不能被当成键；引号要被剥掉"""
+    import gateway
+    gw_dir = tmp_path / "free-gateway"
+    gw_dir.mkdir(parents=True)
+    (gw_dir / ".env").write_text(
+        '# API_KEY=commented\nAPI_KEY="quoted-key"\n', encoding="utf-8")
+    assert gateway._read_env_key("API_KEY", base_dir=gw_dir) == "quoted-key"
+
+
+def test_bridge_key_candidates_include_bridge_env(monkeypatch):
+    """候选 Key 列表必须包含从 ai-bridge/.env 读到的值"""
+    import gateway
+    monkeypatch.setattr(gateway, "_read_env_key",
+                        lambda name, base_dir=None:
+                        "from-bridge-env" if name == "API_KEY" else "")
+    monkeypatch.delenv("API_KEY", raising=False)
+    monkeypatch.delenv("BRIDGE_API_KEY", raising=False)
+    candidates = gateway._build_bridge_key_candidates()
+    assert "from-bridge-env" in candidates
+
+
+def test_bridge_key_candidates_are_deduped(monkeypatch):
+    """候选 Key 不能重复（否则 401 重试会白试同一个值）"""
+    import gateway
+    monkeypatch.setattr(gateway, "_read_env_key",
+                        lambda name, base_dir=None: "same-key")
+    monkeypatch.setenv("API_KEY", "same-key")
+    monkeypatch.setenv("BRIDGE_API_KEY", "same-key")
+    candidates = gateway._build_bridge_key_candidates()
+    assert candidates.count("same-key") == 1
+
+
+def test_bridge_stream_retries_with_next_key_on_401(monkeypatch):
+    """第一个 Key 拿到 401 时必须换下一个候选 Key 重试，而不是直接失败"""
+    import asyncio
+    import gateway
+
+    seen_keys = []
+
+    class FakeResp:
+        def __init__(self, status):
+            self.status_code = status
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        async def aiter_lines(self):
+            if False:
+                yield ""
+
+    class FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+        async def __aenter__(self):
+            return self
+        async def __aexit__(self, *a):
+            return False
+        def stream(self, method, url, json=None, headers=None):
+            key = (headers or {}).get("Authorization", "")
+            seen_keys.append(key)
+            return FakeResp(401 if len(seen_keys) == 1 else 200)
+
+    monkeypatch.setattr(gateway.httpx, "AsyncClient", FakeClient)
+    monkeypatch.setattr(gateway, "_BRIDGE_KEY_CANDIDATES", ["bad-key", "good-key"])
+
+    async def run():
+        out = []
+        async for kind, payload in gateway._stream_bridge("poe", {"messages": []}):
+            out.append((kind, payload))
+        return out
+
+    asyncio.run(run())
+    assert seen_keys == ["Bearer bad-key", "Bearer good-key"], seen_keys
+
+
+# ── 本地模型并发闸门 ──────────────────────────────────────────
+#
+# Ollama 在无 GPU 机器上是 CPU 推理，一次只跑一个请求。
+# 没有闸门时并发请求会无限排队，客户端全部超时（实测 4 并发 3 个超时）。
+
+def test_ollama_concurrency_gate_rejects_over_limit(monkeypatch):
+    """在途数达上限且队列满时必须直接拒绝，而不是无限堆积"""
+    import asyncio
+    import gateway
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_CONCURRENCY", 1)
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_QUEUE", 0)
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_WAIT", 0.05)
+    gateway._ollama_state["inflight"] = 0
+    gateway._ollama_state["queued"] = 0
+
+    async def run():
+        assert await gateway._ollama_acquire_slot() is True
+        # 在途已满 + 不允许排队 → 必须拒绝
+        assert await gateway._ollama_acquire_slot() is False
+        await gateway._ollama_release()
+        # 释放后又能拿
+        assert await gateway._ollama_acquire_slot() is True
+        await gateway._ollama_release()
+
+    asyncio.run(run())
+
+
+def test_ollama_concurrency_gate_zero_disables_limit(monkeypatch):
+    """上限为 0 表示不限制"""
+    import asyncio
+    import gateway
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_CONCURRENCY", 0)
+
+    async def run():
+        for _ in range(5):
+            assert await gateway._ollama_acquire_slot() is True
+
+    asyncio.run(run())
+
+
+def test_ollama_concurrency_gate_waits_for_slot(monkeypatch):
+    """队列允许时应该等待，而不是立刻拒绝"""
+    import asyncio
+    import gateway
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_CONCURRENCY", 1)
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_QUEUE", 4)
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_WAIT", 5)
+    gateway._ollama_state["inflight"] = 0
+    gateway._ollama_state["queued"] = 0
+
+    async def run():
+        assert await gateway._ollama_acquire_slot() is True
+
+        async def releaser():
+            await asyncio.sleep(0.3)
+            await gateway._ollama_release()
+
+        t = asyncio.create_task(releaser())
+        # 第二个应该等到释放后拿到名额
+        assert await gateway._ollama_acquire_slot() is True
+        await gateway._ollama_release()
+        await t
+
+    asyncio.run(run())
+
+
+def test_ollama_concurrency_gate_times_out_waiting(monkeypatch):
+    """等待超过上限必须返回 False（而不是一直挂着）"""
+    import asyncio
+    import gateway
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_CONCURRENCY", 1)
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_QUEUE", 4)
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_WAIT", 0.3)
+    gateway._ollama_state["inflight"] = 0
+    gateway._ollama_state["queued"] = 0
+
+    async def run():
+        assert await gateway._ollama_acquire_slot() is True
+        assert await gateway._ollama_acquire_slot() is False
+        await gateway._ollama_release()
+
+    asyncio.run(run())
+
+
+def test_ollama_stream_raises_busy_when_gate_full(monkeypatch):
+    """过载时 _stream_ollama 必须抛 _OllamaBusy"""
+    import asyncio
+    import gateway
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_CONCURRENCY", 1)
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_QUEUE", 0)
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_WAIT", 0.05)
+    gateway._ollama_state["inflight"] = 0
+    gateway._ollama_state["queued"] = 0
+
+    async def run():
+        # 先占满名额
+        assert await gateway._ollama_acquire_slot() is True
+        try:
+            async for _ in gateway._stream_ollama("dolphin-mistral:latest", {}):
+                pass
+        finally:
+            await gateway._ollama_release()
+
+    with pytest.raises(gateway._OllamaBusy):
+        asyncio.run(run())
+
+
+def test_ollama_stream_releases_slot_on_failure(monkeypatch):
+    """异常退出也必须释放名额，否则闸门会被永久占死"""
+    import asyncio
+    import gateway
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_CONCURRENCY", 1)
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_QUEUE", 4)
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_WAIT", 1)
+    gateway._ollama_state["inflight"] = 0
+    gateway._ollama_state["queued"] = 0
+
+    class Boom(Exception):
+        pass
+
+    async def fake_inner(model, body):
+        raise Boom("upstream down")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(gateway, "_stream_ollama_inner", fake_inner)
+
+    async def run():
+        async for _ in gateway._stream_ollama("m", {}):
+            pass
+
+    with pytest.raises(Boom):
+        asyncio.run(run())
+    # 名额必须已归还（在途计数归零）
+    assert gateway._ollama_state["inflight"] == 0
+
+
+def test_gateway_returns_429_when_ollama_busy(monkeypatch):
+    """过载时非流式请求必须返回 429（可重试），而不是 502"""
+    import gateway
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_CONCURRENCY", 1)
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_QUEUE", 0)
+    monkeypatch.setattr(gateway, "OLLAMA_MAX_WAIT", 0.05)
+    gateway._ollama_state["inflight"] = 0
+    gateway._ollama_state["queued"] = 0
+    monkeypatch.setattr(gateway, "_model_catalog",
+                        lambda: {"local-dolphin-mistral": ("ollama", "dolphin-mistral:latest")})
+
+    async def fake_acquire():
+        return False
+
+    monkeypatch.setattr(gateway, "_ollama_acquire_slot", fake_acquire)
+
+    client = TestClient(gateway.app, raise_server_exceptions=False)
+    resp = client.post("/v1/chat/completions", json={
+        "model": "local-dolphin-mistral",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+    })
+    assert resp.status_code == 429, f"过载应返回 429，实际 {resp.status_code}: {resp.text[:200]}"
+    assert resp.headers.get("Retry-After")
+
+
+def test_gateway_ollama_concurrency_default_is_four():
+    """默认在途上限必须是 4（CPU 单次推理 30~60s，限 1 会误伤正常并发）"""
+    import gateway
+    assert gateway.OLLAMA_MAX_CONCURRENCY == 4
+    assert gateway.OLLAMA_MAX_QUEUE == 8

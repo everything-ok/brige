@@ -239,6 +239,91 @@ def test_chat_completions_requires_key(client_and_cfg):
     assert resp.status_code == 401
 
 
+def test_api_routes_reject_before_body_validation(client_and_cfg):
+    """鉴权必须发生在请求体校验之前。
+
+    回归用例：/v1/chat/completions 早期把鉴权写在 handler 第一行，
+    FastAPI 先做 Pydantic 请求体校验 → 畸形 body 直接 422 返回，
+    鉴权代码根本没执行 → 未授权用户可用畸形 body 探测接口。
+    修复后必须先 401。
+    """
+    client, cfg, _ = client_and_cfg
+    cfg.API_KEY = "secret"
+
+    # 畸形 body（缺 messages）—— 修复前返回 422（鉴权被绕过）
+    resp = client.post("/v1/chat/completions", json={"bad": "body"})
+    assert resp.status_code == 401, \
+        f"畸形请求体应先被鉴权拦下，实际 {resp.status_code}: {resp.text[:200]}"
+
+    # 空 body
+    resp = client.post("/v1/chat/completions", json={})
+    assert resp.status_code == 401
+
+    # /v1/messages 同样不能被 422 抢先
+    resp = client.post("/v1/messages", json={"bad": "body"})
+    assert resp.status_code == 401
+
+    # 带正确 key 时才轮到请求体校验（422）
+    resp = client.post("/v1/chat/completions", json={"bad": "body"},
+                       headers={"Authorization": "Bearer secret"})
+    assert resp.status_code == 422
+
+
+def test_api_routes_do_not_accept_admin_cookie(client_and_cfg):
+    """数据面接口不能被管理页 Cookie 顺带授权。
+
+    Cookie 是浏览器场景的凭据，若 /v1/* 也认，
+    一个被诱导打开管理页的浏览器就能替攻击者调用数据面。
+    """
+    client, cfg, _ = client_and_cfg
+    cfg.API_KEY = "secret"
+    client.post("/admin/unlock", json={"key": "secret"})
+    # 解锁后浏览器会带上 Cookie；数据面必须仍然 401
+    resp = client.get("/v1/models")
+    assert resp.status_code == 401
+
+
+def test_admin_routes_still_accept_admin_cookie(client_and_cfg):
+    """管理面依然认 Cookie（管理页解锁流程不能被这次改动打断）"""
+    client, cfg, _ = client_and_cfg
+    cfg.API_KEY = "secret"
+    client.post("/admin/unlock", json={"key": "secret"})
+    resp = client.get("/admin/status")
+    assert resp.status_code == 200
+
+
+def test_api_routes_accept_x_api_key_header(client_and_cfg):
+    """数据面同样支持 X-API-Key 头（浏览器 fetch / 脚本）"""
+    client, cfg, _ = client_and_cfg
+    cfg.API_KEY = "secret"
+    resp = client.get("/v1/models", headers={"X-API-Key": "secret"})
+    assert resp.status_code == 200
+
+
+def test_all_api_routes_declare_auth_dependency(client_and_cfg):
+    """护栏：所有 /v1/* 路由都必须挂 api_auth 依赖。
+
+    防止以后新增数据面接口时又落回「handler 里鉴权」的老坑。
+    """
+    import main as m
+    client, cfg, _ = client_and_cfg
+
+    protected = set()
+    for r in m.app.routes:
+        path = getattr(r, "path", None)
+        if not path:
+            continue
+        deps = getattr(getattr(r, "dependant", None), "dependencies", []) or []
+        names = {getattr(d.call, "__name__", "") for d in deps}
+        if "require_api_key" in names:
+            protected.add(path)
+
+    api_paths = {p for p in protected if p.startswith("/v1/")}
+    expected = {"/v1/models", "/v1/chat/completions", "/v1/messages"}
+    assert expected <= api_paths, \
+        f"以下数据面路由缺少鉴权依赖: {sorted(expected - api_paths)}"
+
+
 # ── 5. 输入边界：请求体校验 ───────────────────────────────────
 
 def test_chat_completions_rejects_missing_messages(client_and_cfg):

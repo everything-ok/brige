@@ -273,26 +273,18 @@ def _strip_bearer(auth: str) -> str:
     return auth
 
 
-def verify_key(authorization: Optional[str] = None):
-    """校验 Authorization: Bearer <key>（仅供 /v1/* 这类纯 API 路由使用）"""
-    if not config.API_KEY:
-        return
-    if not authorization:
-        raise HTTPException(401, "Missing Authorization")
-    token = _strip_bearer(authorization)
-    if token != config.API_KEY:
-        raise HTTPException(401, "Invalid API Key")
-
-
 # 管理页 / 管理类接口的鉴权 Cookie 名
 ADMIN_COOKIE = "bridge_admin_key"
 
 
-def _extract_key(request: Request) -> Optional[str]:
+def _extract_key(request: Request, allow_cookie: bool = True) -> Optional[str]:
     """从请求里提取 API Key，支持三种来源：
       1. Authorization: Bearer <key>   （IDE / 脚本）
       2. X-API-Key: <key>              （浏览器 fetch）
       3. Cookie: bridge_admin_key=<key>（管理页登录态）
+
+    allow_cookie=False 时只认前两种 —— 数据面接口不应该被
+    浏览器里存着的管理页登录态顺带授权。
     """
     auth = request.headers.get("authorization")
     if auth:
@@ -300,9 +292,10 @@ def _extract_key(request: Request) -> Optional[str]:
     xk = request.headers.get("x-api-key")
     if xk:
         return xk.strip()
-    ck = request.cookies.get(ADMIN_COOKIE)
-    if ck:
-        return ck.strip()
+    if allow_cookie:
+        ck = request.cookies.get(ADMIN_COOKIE)
+        if ck:
+            return ck.strip()
     return None
 
 
@@ -324,8 +317,28 @@ async def require_key(request: Request):
         raise HTTPException(401, "Invalid or missing API Key")
 
 
+async def require_api_key(request: Request):
+    """/v1/* 数据面接口的鉴权。
+
+    与 require_key 的区别：**只认请求头**（Authorization / X-API-Key），
+    不认 Cookie —— 数据面是给 IDE/脚本用的程序化接口，
+    不应该被浏览器里存着的管理页登录态"顺带"授权。
+
+    同样必须以依赖形式挂在路由上：/v1/chat/completions 之前把
+    鉴权写在 handler 第一行，FastAPI 会先做请求体校验，
+    非法 body 直接 422 返回 → 鉴权代码根本没执行，
+    攻击者能用畸形请求体探测接口并绕过鉴权。
+    """
+    if not config.API_KEY:
+        return
+    token = _extract_key(request, allow_cookie=False)
+    if not token or token != config.API_KEY:
+        raise HTTPException(401, "Missing or invalid API Key")
+
+
 # 路由级鉴权依赖：挂在 dependencies 上，保证在请求体解析之前就拦下
 admin_auth = [Depends(require_key)]
+api_auth = [Depends(require_api_key)]
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1956,9 +1969,8 @@ async def _wait_for_login(page, site_name: str, timeout_minutes: int = 10) -> bo
     return False
 
 
-@app.get("/v1/models")
+@app.get("/v1/models", dependencies=api_auth)
 async def list_models(authorization: Optional[str] = Header(None)):
-    verify_key(authorization)
     # 每个站点暴露为一个模型，ID = 站点名（IDE 模型选择器显示桥接站点名）
     # 需登录站点若登录态已明确失效(is_logged_in=False)则不暴露，
     # 避免选中后必失败的体验；None(未检测过) 视为可用
@@ -1976,9 +1988,8 @@ async def list_models(authorization: Optional[str] = Header(None)):
     return {"object": "list", "data": models}
 
 
-@app.post("/v1/chat/completions")
+@app.post("/v1/chat/completions", dependencies=api_auth)
 async def chat_completions(request: ChatRequest, authorization: Optional[str] = Header(None)):
-    verify_key(authorization)
 
     # or/* 前缀 = OpenRouter 具体模型直通网关；local 前缀 = 本地 Ollama 模型直通网关
     # （Zed bridge 组的具体模型条目都走这条快速路径，无浏览器）
@@ -2204,6 +2215,18 @@ async def _gateway_proxy(openai_msgs: list, stream: bool, requested_model: str =
                 async with httpx.AsyncClient(timeout=600) as cli:
                     async with cli.stream("POST", f"{GATEWAY_BASE}/v1/chat/completions",
                                           json=payload) as r:
+                        # 网关返回 429（本地模型并发已满）时，必须原样把状态码
+                        # 传出去；否则客户端只会看到一段"正常"的 SSE 错误帧，
+                        # 以为模型正常返回了内容。
+                        if r.status_code != 200:
+                            detail = (await r.aread()).decode(errors="replace")[:400]
+                            yield (json.dumps({
+                                "error": {"message": detail or f"gateway {r.status_code}",
+                                          "type": "gateway_busy" if r.status_code == 429
+                                                  else "gateway_error"},
+                            }, ensure_ascii=False) + "\n\n").encode()
+                            yield b"data: [DONE]\n\n"
+                            return
                         async for chunk in r.aiter_bytes():
                             yield chunk
             return StreamingResponse(gen(), media_type="text/event-stream")
@@ -2385,11 +2408,6 @@ def _blocks_to_text(content) -> str:
 _SYSTEM_RE = re.compile(r"<system-reminder>.*?</system-reminder>", re.DOTALL)
 
 
-def _verify_anthropic_auth(authorization: Optional[str], x_api_key: Optional[str]):
-    """兼容 x-api-key 与 Authorization Bearer 两种鉴权头"""
-    verify_key(x_api_key and f"Bearer {x_api_key}" or authorization)
-
-
 async def _anthropic_messages_impl(body: dict, stream: bool):
     pinned_site, model = resolve_site_model(body.get("model"))
 
@@ -2526,13 +2544,12 @@ async def _stream_sse_anthropic(messages, model_name: str, pinned_site: Optional
         current_site = next_site
 
 
-@app.post("/v1/messages")
+@app.post("/v1/messages", dependencies=api_auth)
 async def anthropic_messages(request: Request,
                              authorization: Optional[str] = Header(None),
                              x_api_key: Optional[str] = Header(None)):
     """Anthropic Messages API 兼容端点，供 Claude Code 设置
     ANTHROPIC_BASE_URL=http://127.0.0.1:18792 后直连使用。模型只接受最新的前 3 个 GLM。"""
-    _verify_anthropic_auth(authorization, x_api_key)
     try:
         body = await request.json()
     except Exception:

@@ -15,6 +15,7 @@ import json
 import re
 import time
 import asyncio
+from pathlib import Path
 from typing import AsyncGenerator, Optional
 
 import httpx
@@ -36,6 +37,33 @@ if sys.platform == "win32":
         pass
 
 load_dotenv()
+# 网关与桥接是两个进程、两个 .env（free-gateway/.env 与 ai-bridge/.env）。
+# 只读自己的 .env 的话，管理员在 ai-bridge/.env 里设的 API_KEY
+# 网关根本看不到 → 网关回调桥接(/v1/chat/completions)会被 401，
+# 表现为"本地模型正常、一走网页站点就失败"。
+# 所以额外把 ai-bridge/.env 里的 API_KEY 读进来（网关自己的配置优先）。
+def _read_env_key(name: str, base_dir=None) -> str:
+    """从本目录 .env 与 ../ai-bridge/.env 里读取某个键（不写入 os.environ）"""
+    here = Path(base_dir).resolve() if base_dir else Path(__file__).resolve().parent
+    for candidate in (here / ".env", here.parent / "ai-bridge" / ".env"):
+        try:
+            if not candidate.is_file():
+                continue
+            for line in candidate.read_text(encoding="utf-8", errors="replace").splitlines():
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == name:
+                    return v.strip().strip('"').strip("'")
+        except Exception:
+            continue
+    return ""
+
+
+def _read_bridge_api_key() -> str:
+    return _read_env_key("API_KEY")
+
 
 HOST = os.getenv("GATEWAY_HOST", "127.0.0.1")
 PORT = int(os.getenv("GATEWAY_PORT", "8787"))
@@ -45,8 +73,28 @@ OLLAMA_BASE = os.getenv("OLLAMA_BASE", "http://127.0.0.1:11434")
 BRIDGE_BASE = os.getenv("BRIDGE_BASE", "http://127.0.0.1:18792")   # ai-bridge 桥接
 OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()       # 可选
 # ai-bridge 若配置了 API_KEY，网关调它也必须带上，否则 401。
-# 两边共用同一个 .env 时直接读 API_KEY 即可。
-BRIDGE_KEY = os.getenv("BRIDGE_API_KEY") or os.getenv("API_KEY", "").strip()
+# 优先级：BRIDGE_API_KEY > 本目录 .env 的 API_KEY > ai-bridge/.env 的 API_KEY
+BRIDGE_KEY = (os.getenv("BRIDGE_API_KEY") or os.getenv("API_KEY", "").strip()
+              or _read_bridge_api_key())
+
+# 网关调用桥接时可能用到的候选 Key（按优先级）。
+# 环境变量里的 "any"/占位值不一定是桥接真正的 Key —— 桥接 .env 与网关 .env
+# 是两个文件，管理员改了一边另一边就会失配。
+def _build_bridge_key_candidates() -> list:
+    """按优先级收集"可能是桥接 API_KEY"的所有候选值。
+
+    环境变量 > 网关 .env > ai-bridge/.env。
+    """
+    out = []
+    for k in (os.getenv("BRIDGE_API_KEY"), os.getenv("API_KEY"),
+              _read_env_key("API_KEY"), _read_env_key("BRIDGE_API_KEY")):
+        k = (k or "").strip()
+        if k and k not in out:
+            out.append(k)
+    return out
+
+
+_BRIDGE_KEY_CANDIDATES = _build_bridge_key_candidates()
 
 # ── 模型注册表：Zed 显示名 -> (后端, 真实模型ID) ──────────────────
 # 原则：只暴露保证可用的模型（2026-11-02 验证）
@@ -176,6 +224,91 @@ AUTO_CHAIN = [
 
 app = FastAPI(title="Free Gateway", version="1.0.0")
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+# ── 本地模型准入控制（Admission Control） ─────────────────────
+#
+# Ollama 在没有 GPU 的机器上是 CPU 推理，llama.cpp 一次只跑一个请求，
+# 后来的请求全部在 Ollama 内部排队。实测（本机 8 核 / 无 GPU / 内存吃紧）：
+# 4 个并发请求排队 60s+，客户端超时断开，服务端还在闷头推理，
+# 越堆越多 —— 这就是"4 并发 3 个超时"的根因。
+#
+# 关键认识：**不能简单粗暴地"并发>1 就 429"**。
+# 本机单次本地推理本身就要 30~60s（CPU），并发上限设为 1 时，
+# 任何一个慢请求都会把后面所有请求打成 429 —— 那是误伤，不是保护。
+#
+# 正确的做法是准入控制：
+#   · 允许"在途(in-flight)"请求数 ≤ OLLAMA_MAX_CONCURRENCY（默认 4），
+#     超出就快速拒绝 429，避免无限堆积；
+#   · 等待队列有上限 OLLAMA_MAX_QUEUE（默认 8），
+#     队列满也直接 429（客户端会自己重试，不会堆积在服务端）；
+#   · 队列里的请求等待时间上限 OLLAMA_MAX_WAIT（默认 120s），
+#     超时返回 429 而不是让客户端先超时。
+#
+# 环境变量：
+#   OLLAMA_MAX_CONCURRENCY  在途请求上限（0 = 不限制），默认 4
+#   OLLAMA_MAX_QUEUE        等待队列上限（0 = 不排队），默认 8
+#   OLLAMA_MAX_WAIT         队列最长等待秒数，默认 120
+OLLAMA_MAX_CONCURRENCY = max(0, int(os.getenv("OLLAMA_MAX_CONCURRENCY", "4")))
+OLLAMA_MAX_QUEUE = max(0, int(os.getenv("OLLAMA_MAX_QUEUE", "8")))
+OLLAMA_MAX_WAIT = max(0.0, float(os.getenv("OLLAMA_MAX_WAIT", "120")))
+
+_ollama_state = {"inflight": 0, "queued": 0}
+_ollama_lock = None          # asyncio.Lock，懒创建
+
+
+class _OllamaBusy(Exception):
+    """本地模型过载 —— 应返回 429 + Retry-After，而不是让客户端超时"""
+
+
+def _ollama_get_lock():
+    global _ollama_lock
+    if _ollama_lock is None:
+        _ollama_lock = asyncio.Lock()
+    return _ollama_lock
+
+
+async def _ollama_acquire_slot() -> bool:
+    """申请一个本地推理名额。
+
+    · 在途数未达上限 → 立即放行；
+    · 达到上限但队列未满 → 排队等待（最多 OLLAMA_MAX_WAIT 秒）；
+    · 队列已满或等待超时 → 返回 False（调用方抛 _OllamaBusy → 429）。
+    """
+    if OLLAMA_MAX_CONCURRENCY <= 0:
+        return True
+    lock = _ollama_get_lock()
+    deadline = time.monotonic() + OLLAMA_MAX_WAIT
+    async with lock:
+        if _ollama_state["inflight"] < OLLAMA_MAX_CONCURRENCY:
+            _ollama_state["inflight"] += 1
+            return True
+        if OLLAMA_MAX_QUEUE <= 0 or _ollama_state["queued"] >= OLLAMA_MAX_QUEUE:
+            return False
+        _ollama_state["queued"] += 1
+    try:
+        # 轮询等待名额（配合 _ollama_release 的通知）
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            async with lock:
+                if _ollama_state["inflight"] < OLLAMA_MAX_CONCURRENCY:
+                    _ollama_state["inflight"] += 1
+                    return True
+            await asyncio.sleep(min(0.25, remaining))
+    finally:
+        async with lock:
+            _ollama_state["queued"] = max(0, _ollama_state["queued"] - 1)
+
+
+async def _ollama_release():
+    """释放一个在途名额"""
+    if OLLAMA_MAX_CONCURRENCY <= 0:
+        return
+    lock = _ollama_get_lock()
+    async with lock:
+        if _ollama_state["inflight"] > 0:
+            _ollama_state["inflight"] -= 1
 
 # ── OpenRouter 免费模型动态目录（10 分钟缓存） ──────────────────
 _or_cache = {"ids": [], "ts": 0.0}
@@ -419,6 +552,18 @@ async def _stream_llm7(real_model: str, body: dict) -> AsyncGenerator[tuple, Non
 
 
 async def _stream_ollama(real_model: str, body: dict) -> AsyncGenerator[tuple, None]:
+    # 准入控制：CPU 推理一次只能跑一个，多的排队（队列有上限），
+    # 等不到就明确拒绝（429），而不是无限堆积到客户端超时。
+    if not await _ollama_acquire_slot():
+        raise _OllamaBusy("本地模型过载，请稍后重试")
+    try:
+        async for piece in _stream_ollama_inner(real_model, body):
+            yield piece
+    finally:
+        await _ollama_release()
+
+
+async def _stream_ollama_inner(real_model: str, body: dict) -> AsyncGenerator[tuple, None]:
     # keep_alive: 模型驻留内存 30 分钟 —— 低内存设备上重复使用同一模型
     # 不会反复冷加载（切换模型时上一个自动换出，不占双份内存）
     payload = {"model": real_model, "messages": body.get("messages", []),
@@ -486,31 +631,40 @@ async def _stream_bridge(model_name: str, body: dict) -> AsyncGenerator[tuple, N
                "stream": True}
     if body.get("tools"):
         payload["tools"] = body["tools"]
-    headers = {}
-    if BRIDGE_KEY:
-        headers["Authorization"] = f"Bearer {BRIDGE_KEY}"
-    async with httpx.AsyncClient(timeout=600) as cli:
-        async with cli.stream("POST", f"{BRIDGE_BASE}/v1/chat/completions",
-                              json=payload, headers=headers) as r:
-            if r.status_code != 200:
-                raise RuntimeError(f"bridge {r.status_code}")
-            async for line in r.aiter_lines():
-                if not line.startswith("data: "):
-                    continue
-                chunk = line[6:]
-                if chunk.strip() == "[DONE]":
-                    break
-                try:
-                    obj = json.loads(chunk)
-                    delta = obj["choices"][0].get("delta", {})
-                except Exception:
-                    continue
-                content = delta.get("content")
-                if content:
-                    yield ("text", content)
-                tcs = delta.get("tool_calls")
-                if tcs:
-                    yield ("tool_calls", tcs)
+    url = f"{BRIDGE_BASE}/v1/chat/completions"
+    # 桥接的 API_KEY 与网关的 .env 是两个文件，用户改了一边就可能失配。
+    # 逐个尝试候选 Key，401 时换下一个 —— 否则一次配置不同步就
+    # 表现为"网页站点全部 401"，且没有任何提示。
+    candidates = list(_BRIDGE_KEY_CANDIDATES) or [""]
+    last_status = 0
+    for idx, key in enumerate(candidates):
+        headers = {"Authorization": f"Bearer {key}"} if key else {}
+        async with httpx.AsyncClient(timeout=600) as cli:
+            async with cli.stream("POST", url, json=payload, headers=headers) as r:
+                if r.status_code == 401 and idx + 1 < len(candidates):
+                    last_status = r.status_code
+                    continue        # 换下一个候选 Key 重试
+                if r.status_code != 200:
+                    raise RuntimeError(f"bridge {r.status_code}")
+                async for line in r.aiter_lines():
+                    if not line.startswith("data: "):
+                        continue
+                    chunk = line[6:]
+                    if chunk.strip() == "[DONE]":
+                        break
+                    try:
+                        obj = json.loads(chunk)
+                        delta = obj["choices"][0].get("delta", {})
+                    except Exception:
+                        continue
+                    content = delta.get("content")
+                    if content:
+                        yield ("text", content)
+                    tcs = delta.get("tool_calls")
+                    if tcs:
+                        yield ("tool_calls", tcs)
+                return
+    raise RuntimeError(f"bridge {last_status or 401}")
 
 
 # 「函数名: {参数}」形式（无 JSON 外壳、无 name 字段）
@@ -601,6 +755,9 @@ def _parse_tool_call_text(text: str):
 async def _stream_ollama_text_tools(real_model: str, body: dict,
                                     tools: list) -> AsyncGenerator[tuple, None]:
     """不支持原生 tools 的 Ollama 模型走「文本模拟工具调用」。
+
+    注意：并发槽位由 _stream_ollama 统一持有，这里不要再申请，
+    否则会自己把自己挡在门外（槽位已满 → 直接拒绝）。
 
     与 ai-bridge/tool_emulation.py 同思路：把 schema 渲染成自然语言说明注入
     最后一条 user 消息，模型用 ```tool_call 围栏输出，再解析成 OpenAI tool_calls。
@@ -800,6 +957,7 @@ async def chat(request: Request):
             candidates = AUTO_CHAIN if backend == "auto" else [(backend, real)]
         last_err = None
         served = None            # 实际服务的模型（auto 链解析后）
+        busy = False             # 是否因为"本地模型并发已满"而失败
         for bk, rl in candidates:
             try:
                 got = False
@@ -818,10 +976,17 @@ async def chat(request: Request):
                     yield _sse_done()
                     return
                 last_err = f"{bk} 返回空回复"
+            except _OllamaBusy as e:
+                # 本地模型并发已满 → 明确告诉客户端"稍后重试"，
+                # 而不是笼统的"所有后端失败"（那是 502，客户端不会重试）
+                last_err = str(e)
+                busy = True
+                continue
             except Exception as e:
                 last_err = f"{bk}: {e}"
                 continue
-        err = {"error": {"message": f"所有后端失败: {last_err}", "type": "gateway_error"}}
+        err_type = "gateway_busy" if busy else "gateway_error"
+        err = {"error": {"message": f"所有后端失败: {last_err}", "type": err_type}}
         yield f"data: {json.dumps(err, ensure_ascii=False)}\n\n".encode()
         yield b"data: [DONE]\n\n"
 
@@ -841,9 +1006,10 @@ async def chat(request: Request):
     parts = []
     tool_calls = []
     error_msg = None
+    error_type = None
 
     async def collect():
-        nonlocal tool_calls, error_msg
+        nonlocal tool_calls, error_msg, error_type
         async for piece in gen_tracked():
             try:
                 obj = json.loads(piece.decode().removeprefix("data: ").strip())
@@ -853,6 +1019,7 @@ async def chat(request: Request):
             # 否则客户端只会收到一个空回复（"模型没生效"的假象）
             if "error" in obj:
                 error_msg = (obj["error"] or {}).get("message") or "上游请求失败"
+                error_type = (obj["error"] or {}).get("type")
                 continue
             delta = (obj.get("choices") or [{}])[0].get("delta", {})
             if delta.get("content"):
@@ -862,6 +1029,11 @@ async def chat(request: Request):
 
     await collect()
     if error_msg and not parts and not tool_calls:
+        # 并发已满 → 429 + Retry-After，客户端会自己重试；
+        # 其他失败 → 502
+        if error_type == "gateway_busy":
+            raise HTTPException(429, error_msg,
+                                headers={"Retry-After": "3"})
         raise HTTPException(502, error_msg)
     text = "".join(parts)
     msg = {"role": "assistant", "content": text}
