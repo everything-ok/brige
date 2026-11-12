@@ -16,7 +16,7 @@ import re
 import time
 import asyncio
 from pathlib import Path
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator
 
 import httpx
 from fastapi import FastAPI, Request, HTTPException
@@ -485,7 +485,7 @@ async def local_models_status():
 @app.post("/market/refresh")
 async def market_refresh():
     """拉新：强制重拉 OpenRouter 最新免费目录 + 扫描本机 Ollama 新装模型自动接入"""
-    import subprocess, json as _json
+    import subprocess
     prev_free = set(_or_cache.get("ids", []))
     _or_cache["ts"] = 0.0            # 强制缓存失效
     fresh_free = await _openrouter_free_ids()
@@ -506,7 +506,8 @@ async def market_refresh():
                 added_local.append(key)
         if added_local:
             _save_local_models(LOCAL_MODELS)
-    except Exception as e:
+    except Exception:
+        # ollama CLI 不可用/超时 —— 不影响本接口的其他部分
         pass
     return {"success": True, "free_total": len(fresh_free),
             "new_free": new_free[:10], "local_added": added_local}
@@ -763,7 +764,6 @@ async def _stream_ollama_text_tools(real_model: str, body: dict,
     最后一条 user 消息，模型用 ```tool_call 围栏输出，再解析成 OpenAI tool_calls。
     这样 dolphin-mistral / qwen-abliterate 这类小模型也能在 Agent 模式里用。
     """
-    import re
 
     instr = ["", "--- 可用工具 ---",
              "你可以调用下列工具来完成操作。如果需要调用工具，"
@@ -936,8 +936,6 @@ async def chat(request: Request):
     body = await request.json()
     model = (body.get("model") or "auto").strip()
     catalog = _model_catalog()
-    # 工具定义（IDE Agent 模式必需），原样透传给支持 tool call 的后端
-    tools = body.get("tools") or None
 
     if model.startswith("or/") and OPENROUTER_KEY:
         # or/<model> 前缀直通 OpenRouter（模型 id 透传，无需登记）
@@ -1009,7 +1007,7 @@ async def chat(request: Request):
     error_type = None
 
     async def collect():
-        nonlocal tool_calls, error_msg, error_type
+        nonlocal error_msg, error_type
         async for piece in gen_tracked():
             try:
                 obj = json.loads(piece.decode().removeprefix("data: ").strip())

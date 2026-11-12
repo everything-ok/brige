@@ -46,7 +46,6 @@ from limiter.balancer import LoadBalancer
 from security import SecurityManager
 from providers.generic import GenericProvider, Message, match_login_state
 from providers.validator import BridgeValidator
-from providers.model_fetcher import fetch_models_for_site
 import tool_emulation
 import model_catalog
 
@@ -1661,7 +1660,6 @@ async def autologin_code(site_name: str, request: Request):
 async def zed_refresh_models(request: Request):
     """只更新 Zed settings.json 的三组模型列表，不重启 Zed、不动其他配置。
     供管理页「模型市场」的一键加载使用。"""
-    import httpx as _hx
     import os as _os
     from browser import profile_manager as _pm
 
@@ -2826,7 +2824,6 @@ async def admin_clear_profile(request: Request, site: str,
 @app.get("/ide/detect", dependencies=admin_auth)
 async def ide_detect(request: Request):
     import psutil
-    import concurrent.futures
 
     ide_patterns = [
         ("kiro",     ["kiro"],                            {"name": "Kiro",     "icon": "🪐"}),
@@ -2880,7 +2877,7 @@ def _open_zed_agent_panel():
     策略：等 Zed 窗口就绪 → 按进程 MainWindowHandle 激活前台 →
     Ctrl+Shift+A 打开 agent 面板。
     """
-    import time, subprocess, os
+    import time, subprocess
 
     ps_script = r'''
 Add-Type @"
