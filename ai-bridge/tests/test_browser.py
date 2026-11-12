@@ -262,11 +262,12 @@ class TestBrowserManager:
 
         manager._pages = {"poe": mock_page}
         manager._contexts = {"poe": mock_ctx}
-        manager._profile_manager = MagicMock()
-        manager._profile_manager.clear_profile = MagicMock()
+        # profile_manager 是模块级单例（browser.manager.profile_manager），
+        # 不是 manager 的实例属性 —— 必须 patch 模块符号才能拦截调用
+        with patch("browser.manager.profile_manager") as mock_pm:
+            mock_pm.clear_profile = MagicMock()
+            await manager.clear_site("poe")
 
-        await manager.clear_site("poe")
-
-        assert "poe" not in manager._pages
-        assert "poe" not in manager._contexts
-        manager._profile_manager.clear_profile.assert_called_once_with("poe")
+            assert "poe" not in manager._pages
+            assert "poe" not in manager._contexts
+            mock_pm.clear_profile.assert_called_once_with("poe")

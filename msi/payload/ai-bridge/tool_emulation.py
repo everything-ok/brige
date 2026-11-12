@@ -18,7 +18,7 @@ Claude Code）必须靠 tool call 才能改代码。
 """
 import json
 import re
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 # 围栏格式：```tool_call ... ```（也兼容裸 JSON 行）
 _FENCE_RE = re.compile(
@@ -90,7 +90,6 @@ def flatten_tool_messages(messages: List[dict]) -> List[dict]:
     for m in messages:
         role = m.get("role")
         if role == "tool":
-            name = ""
             fn = m.get("name") or ""
             content = m.get("content")
             if isinstance(content, list):
@@ -167,6 +166,91 @@ def _collect_fence(text: str) -> Optional[dict]:
     return None
 
 
+# 裸 JSON（没有围栏）：小模型经常直接输出
+#   {"name": "get_weather", "arguments": {...}}
+# 后面还可能跟一段解释文字，所以不能要求整段都是 JSON。
+_BARE_JSON_RE = re.compile(
+    r'\{\s*"name"\s*:\s*"[^"]+".*?\}(?=\s|$)',
+    re.DOTALL,
+)
+
+# 「函数名: {参数}」形式（不带 JSON 外壳的 name 字段）
+# 小模型很常见的输出：  get_weather: {"city": "Beijing"}
+#                      get_weather({"city": "Beijing"})
+# 这种格式既没有 ```tool_call 围栏，也没有 "name" 字段，
+# 只靠前面的正则永远匹配不到 → 工具调用退化成普通文本，Agent 模式失效。
+# 必须整段匹配（^...$），避免把正常句子里的 "xxx: {...}" 误判成工具调用。
+_NAMED_ARGS_RE = re.compile(
+    r'^\s*["\']?(?P<name>[A-Za-z_][A-Za-z0-9_.\-]*)["\']?\s*'
+    r'(?:\(\s*|\s*:\s*|\s+)\s*'
+    r'(?P<args>\{.*\})\s*\)?\s*$',
+    re.DOTALL,
+)
+
+
+def _collect_named_args(text: str) -> Optional[dict]:
+    """解析「工具名: {参数}」形式的工具调用。
+
+    只在整段文本就是一个工具调用时才认定，
+    避免普通回答里出现 "note: {...}" 时产生幻觉工具调用。
+    真正的安全性由下游的"工具名白名单"校验兜底：
+    名字不在允许列表里就当普通文本。
+    """
+    if not text:
+        return None
+    candidate_text = text.strip()
+    if not candidate_text or "\n\n" in candidate_text:
+        # 多段文本 → 逐行试（模型有时先写一句话再写调用）
+        lines = [ln for ln in candidate_text.splitlines() if ln.strip()]
+        if len(lines) != 1:
+            return None
+        candidate_text = lines[0].strip()
+
+    m = _NAMED_ARGS_RE.match(candidate_text)
+    if not m:
+        return None
+    name = m.group("name")
+    raw_args = m.group("args").strip()
+    args = None
+    for candidate in _json_candidates(raw_args):
+        if isinstance(candidate, dict):
+            args = candidate
+            break
+    if args is None:
+        args = {}
+    return {"name": name, "arguments": args}
+
+
+def _collect_bare_json(text: str) -> Optional[dict]:
+    """从没有围栏的裸 JSON 里提取工具调用。
+
+    没有这一步，本地小模型（dolphin/qwen/lexi）在网页模式下
+    会把工具调用降级成普通文本，IDE 的 Agent 模式就完全用不了。
+    """
+    if not text:
+        return None
+    if '"name"' in text:
+        for m in _BARE_JSON_RE.finditer(text):
+            raw = m.group(0).strip()
+            for candidate in _json_candidates(raw):
+                if isinstance(candidate, dict) and candidate.get("name"):
+                    return candidate
+    # 「工具名: {参数}」形式兜底
+    return _collect_named_args(text)
+
+
+def _json_candidates(raw: str):
+    """尝试把字符串解析成 JSON 对象（容忍尾逗号等小毛病）"""
+    try:
+        yield json.loads(raw)
+    except Exception:
+        pass
+    try:
+        yield json.loads(re.sub(r",\s*([}\]])", r"\1", raw))
+    except Exception:
+        pass
+
+
 def parse_tool_call(
     text: str,
     tools: Optional[List[dict]] = None,
@@ -177,6 +261,9 @@ def parse_tool_call(
     工具调用对象: {"name": str, "arguments": dict}
     """
     call = _collect_fence(text)
+    if not call:
+        # 小模型常不写围栏，直接输出裸 JSON → 兜底解析
+        call = _collect_bare_json(text)
     if not call:
         return text, None
 
@@ -200,8 +287,15 @@ def parse_tool_call(
 
     # 去掉围栏内容，剩下的作为普通文本
     cleaned = _FENCE_RE.sub("", text)
-    cleaned = _FENCE_JSON_RE.sub("", cleaned).strip()
-    return cleaned, {"name": name, "arguments": args}
+    cleaned = _FENCE_JSON_RE.sub("", cleaned)
+    cleaned = _FENCE_JSON_LOOSE_RE.sub("", cleaned)
+    if _BARE_JSON_RE.search(cleaned):
+        # 裸 JSON 也要从正文里摘掉，否则 IDE 会把 JSON 当成回答内容
+        cleaned = _BARE_JSON_RE.sub("", cleaned)
+    # 「工具名: {参数}」形式：整段就是一个调用时，正文应清空
+    if _NAMED_ARGS_RE.match(cleaned.strip()):
+        cleaned = ""
+    return cleaned.strip(), {"name": name, "arguments": args}
 
 
 def to_openai_tool_call(call: dict, index: int = 0) -> dict:

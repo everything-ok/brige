@@ -210,3 +210,111 @@ sites:
         c = self._make_config_with_yaml("")
         assert c.sites == []
         assert c.captcha_indicators == []
+
+
+class TestReloadSemantics:
+    """热重载语义：_load_yaml 必须「替换」而不是「追加」
+
+    实测 bug（live_e2e 发现）：
+        加载 1 次 → 24 个站点
+        加载 2 次 → 48 个
+        加载 3 次 → 72 个
+    根因：_load_yaml 用 self.sites.append(...) 而不是整体替换，
+          每次 /sites/add 或 /sites/remove 触发热重载都会把站点列表翻倍。
+    后果：/v1/models 出现重复模型 ID、限流按站点统计被放大、内存持续增长。
+    """
+
+    def _write_yaml(self, tmp_path, names):
+        data = {
+            "sites": [
+                {"name": n, "enabled": True, "url": f"https://{n}.com",
+                 "priority": i + 1, "models": {f"{n}-m": "m"}}
+                for i, n in enumerate(names)
+            ],
+            "captcha_indicators": [{"selector": "#cf", "name": "cf"}],
+        }
+        p = tmp_path / "sites.yaml"
+        p.write_text(yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+        return p
+
+    def test_reload_does_not_duplicate_sites(self, tmp_path, monkeypatch):
+        import config as config_mod
+        p = self._write_yaml(tmp_path, ["alpha", "beta"])
+        monkeypatch.setattr(config_mod, "BASE_DIR", tmp_path)
+
+        cfg = config_mod.Config.__new__(config_mod.Config)
+        cfg.global_rate_limit = config_mod.RateLimitConfig()
+        cfg.behavior = config_mod.BehaviorConfig()
+        cfg.cooldown = config_mod.CooldownConfig()
+        cfg.security = config_mod.SecurityConfig()
+        cfg.sites = []
+        cfg.captcha_indicators = []
+
+        cfg._load_yaml()
+        assert len(cfg.sites) == 2
+        cfg._load_yaml()
+        assert len(cfg.sites) == 2, "第二次重载后站点数翻倍了"
+        cfg._load_yaml()
+        assert len(cfg.sites) == 2, "第三次重载后站点数翻倍了"
+
+    def test_reload_does_not_duplicate_captcha_indicators(self, tmp_path, monkeypatch):
+        import config as config_mod
+        p = self._write_yaml(tmp_path, ["alpha"])
+        monkeypatch.setattr(config_mod, "BASE_DIR", tmp_path)
+
+        cfg = config_mod.Config.__new__(config_mod.Config)
+        cfg.global_rate_limit = config_mod.RateLimitConfig()
+        cfg.behavior = config_mod.BehaviorConfig()
+        cfg.cooldown = config_mod.CooldownConfig()
+        cfg.security = config_mod.SecurityConfig()
+        cfg.sites = []
+        cfg.captcha_indicators = []
+
+        cfg._load_yaml()
+        cfg._load_yaml()
+        assert len(cfg.captcha_indicators) == 1
+
+    def test_reload_dedupes_same_name_sites(self, tmp_path, monkeypatch):
+        """同名站点只保留一个 —— 站点名即模型 ID，重名会让 IDE 出现重复模型"""
+        import config as config_mod
+        data = {"sites": [
+            {"name": "dup", "enabled": True, "url": "https://a.com", "priority": 1},
+            {"name": "dup", "enabled": True, "url": "https://b.com", "priority": 2},
+        ]}
+        (tmp_path / "sites.yaml").write_text(
+            yaml.safe_dump(data, allow_unicode=True), encoding="utf-8")
+        monkeypatch.setattr(config_mod, "BASE_DIR", tmp_path)
+
+        cfg = config_mod.Config.__new__(config_mod.Config)
+        cfg.global_rate_limit = config_mod.RateLimitConfig()
+        cfg.behavior = config_mod.BehaviorConfig()
+        cfg.cooldown = config_mod.CooldownConfig()
+        cfg.security = config_mod.SecurityConfig()
+        cfg.sites = []
+        cfg.captcha_indicators = []
+
+        cfg._load_yaml()
+        assert len(cfg.sites) == 1
+        assert cfg.get_site("dup") is not None
+
+    def test_reload_replaces_removed_sites(self, tmp_path, monkeypatch):
+        """站点被移除后重载，内存里不能还留着它"""
+        import config as config_mod
+        p = self._write_yaml(tmp_path, ["alpha", "beta"])
+        monkeypatch.setattr(config_mod, "BASE_DIR", tmp_path)
+
+        cfg = config_mod.Config.__new__(config_mod.Config)
+        cfg.global_rate_limit = config_mod.RateLimitConfig()
+        cfg.behavior = config_mod.BehaviorConfig()
+        cfg.cooldown = config_mod.CooldownConfig()
+        cfg.security = config_mod.SecurityConfig()
+        cfg.sites = []
+        cfg.captcha_indicators = []
+        cfg._load_yaml()
+        assert cfg.get_site("beta") is not None
+
+        # 只留 alpha
+        self._write_yaml(tmp_path, ["alpha"])
+        cfg._load_yaml()
+        assert cfg.get_site("beta") is None, "已移除的站点仍留在内存里"
+        assert len(cfg.sites) == 1

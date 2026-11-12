@@ -88,6 +88,12 @@ def mock_config():
     cfg.get_site = lambda name: next((s for s in cfg.sites if s.name == name), None)
     cfg.get_enabled_sites = lambda: [s for s in cfg.sites if s.enabled]
 
+    # 必须显式置空：MagicMock 的属性默认可调用且为真值，
+    # 若不显式声明，config.API_KEY 会被当成"已配置密钥"，
+    # 导致所有需要鉴权的接口（含管理页 /）在测试里返回 401。
+    cfg.API_KEY = ""
+    cfg.HOST = "127.0.0.1"
+
     return cfg
 
 

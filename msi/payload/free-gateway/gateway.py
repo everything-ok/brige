@@ -12,6 +12,7 @@ Free Gateway v1 — 本地免费模型聚合网关 (端口 8787)
 import os
 import sys
 import json
+import re
 import time
 import asyncio
 from typing import AsyncGenerator, Optional
@@ -43,6 +44,9 @@ LLM7_KEY = os.getenv("LLM7_KEY", "unused")          # 免费档 token 固定填 
 OLLAMA_BASE = os.getenv("OLLAMA_BASE", "http://127.0.0.1:11434")
 BRIDGE_BASE = os.getenv("BRIDGE_BASE", "http://127.0.0.1:18792")   # ai-bridge 桥接
 OPENROUTER_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()       # 可选
+# ai-bridge 若配置了 API_KEY，网关调它也必须带上，否则 401。
+# 两边共用同一个 .env 时直接读 API_KEY 即可。
+BRIDGE_KEY = os.getenv("BRIDGE_API_KEY") or os.getenv("API_KEY", "").strip()
 
 # ── 模型注册表：Zed 显示名 -> (后端, 真实模型ID) ──────────────────
 # 原则：只暴露保证可用的模型（2026-11-02 验证）
@@ -285,16 +289,38 @@ async def local_models_list():
             "pull_jobs": _pull_jobs}
 
 
+# 模型 ID（local_models.json 的 key / /v1/models 的 id）必须能安全地
+# 拼进 HTML 与 shell 参数，因此只允许「字母数字下划线连字符点」。
+_MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
 @app.post("/local-models/add")
 async def local_models_add(request: Request):
     """拉取 Ollama 模型并在完成后自动接入（后台执行，立即返回）"""
     import subprocess
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid JSON body")
     ollama_id = (body.get("ollama_id") or "").strip()
     display = (body.get("display") or "").strip()
     if not ollama_id:
         raise HTTPException(status_code=400, detail="需要 ollama_id")
+    # ollama_id 会进 `ollama pull` 的参数列表（虽然是 list 形式，没有 shell 注入），
+    # 但仍要限制长度与字符，避免畸形参数把 CLI 搞挂。
+    if len(ollama_id) > 128 or not re.match(r"^[A-Za-z0-9][A-Za-z0-9_./:-]*$", ollama_id):
+        raise HTTPException(status_code=400, detail="ollama_id 非法")
+    # key 会作为模型 ID 出现在 /v1/models 与管理页 innerHTML 里。
+    # 未过滤时，display 里的 `<script>` 会变成可执行脚本（存储型 XSS），
+    # 而且 key 还可能和 "auto"/"llm7-xxx" 撞名，把内置模型顶掉。
     key = display or ollama_id.split("/")[-1].split(":")[0]
+    if not _MODEL_ID_RE.match(key):
+        raise HTTPException(
+            status_code=400,
+            detail="模型名非法：只允许字母、数字、下划线、连字符、点，"
+                   "且以字母或数字开头（最多 64 字符）")
+    if key in ("auto",) or key.startswith("llm7-") or key.startswith("or/"):
+        raise HTTPException(status_code=400, detail=f"模型名 {key} 与内置模型冲突")
     job_key = ollama_id
     if _pull_jobs.get(job_key, {}).get("status") == "pulling":
         return {"success": True, "message": "该模型正在拉取中", "job": job_key}
@@ -460,9 +486,12 @@ async def _stream_bridge(model_name: str, body: dict) -> AsyncGenerator[tuple, N
                "stream": True}
     if body.get("tools"):
         payload["tools"] = body["tools"]
+    headers = {}
+    if BRIDGE_KEY:
+        headers["Authorization"] = f"Bearer {BRIDGE_KEY}"
     async with httpx.AsyncClient(timeout=600) as cli:
         async with cli.stream("POST", f"{BRIDGE_BASE}/v1/chat/completions",
-                              json=payload) as r:
+                              json=payload, headers=headers) as r:
             if r.status_code != 200:
                 raise RuntimeError(f"bridge {r.status_code}")
             async for line in r.aiter_lines():
@@ -482,6 +511,91 @@ async def _stream_bridge(model_name: str, body: dict) -> AsyncGenerator[tuple, N
                 tcs = delta.get("tool_calls")
                 if tcs:
                     yield ("tool_calls", tcs)
+
+
+# 「函数名: {参数}」形式（无 JSON 外壳、无 name 字段）
+#   get_weather: {"city": "Beijing"}
+#   get_weather({"city": "Beijing"})
+# 整段匹配（^...$），避免把正文里的 "xxx: {...}" 误判成工具调用。
+_NAMED_ARGS_RE = re.compile(
+    r'^\s*["\']?(?P<name>[A-Za-z_][A-Za-z0-9_.\-]*)["\']?\s*'
+    r'(?:\(\s*|\s*:\s*|\s+)\s*'
+    r'(?P<args>\{.*\})\s*\)?\s*$',
+    re.DOTALL,
+)
+
+
+def _parse_tool_call_text(text: str):
+    """从模型输出文本中解析出工具调用对象（找不到返回 None）
+
+    围栏格式多样：```tool_call / ```tool-call / ```toolcall / ```json /
+    ```json object / ```（裸）
+    小模型常写成 ```json {...} ```，必须一并识别，否则工具调用会漏成普通文本。
+    """
+    fence_res = [
+        re.compile(r"```(?:tool_call|tool-call|toolcall)\s*(\{.*?\})\s*```",
+                   re.DOTALL | re.IGNORECASE),
+        re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE),
+        re.compile(r"```\s*json(?:[ \t]+object)?[ \t\r\n]*(\{.*?\})\s*```",
+                   re.DOTALL | re.IGNORECASE),
+        re.compile(r"```\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE),
+    ]
+    for rx in fence_res:
+        m = rx.search(text)
+        if not m:
+            continue
+        raw = m.group(1).strip()
+        try:
+            obj = json.loads(raw)
+        except Exception:
+            # 修掉尾逗号等常见小毛病
+            try:
+                obj = json.loads(re.sub(r",\s*([}\]])", r"\1", raw))
+            except Exception:
+                continue
+        if isinstance(obj, dict) and obj.get("name"):
+            return obj
+    # 小模型经常不写围栏，直接输出裸 JSON → 兜底解析
+    # 注意：裸 JSON 后面常跟一段解释文字，所以不能要求整段都是 JSON，
+    # 要用正则从文本里把 {"name": ...} 这一段抠出来。
+    stripped = text.strip()
+    if stripped.startswith("{") and '"name"' in stripped:
+        try:
+            obj = json.loads(stripped)
+            if isinstance(obj, dict) and obj.get("name"):
+                return obj
+        except Exception:
+            pass
+    for m in re.finditer(r'\{\s*"name"\s*:\s*"[^"]+".*?\}(?=\s|$)', text,
+                         re.DOTALL):
+        raw = m.group(0).strip()
+        for cand in (raw, re.sub(r",\s*([}\]])", r"\1", raw)):
+            try:
+                obj = json.loads(cand)
+            except Exception:
+                continue
+            if isinstance(obj, dict) and obj.get("name"):
+                return obj
+    # 「函数名: {参数}」形式：小模型很常见的输出，
+    #   get_weather: {"city": "Beijing"}
+    #   get_weather({"city": "Beijing"})
+    # 既没有围栏也没有 "name" 字段，前面所有规则都匹配不到 →
+    # 工具调用退化成普通文本，Agent 模式直接失效。
+    # 只在整段文本就是一个调用时才认定；下游还有"工具名白名单"兜底。
+    named = _NAMED_ARGS_RE.match(text.strip())
+    if named:
+        raw_args = named.group("args").strip()
+        args = None
+        for cand in (raw_args, re.sub(r",\s*([}\]])", r"\1", raw_args)):
+            try:
+                obj = json.loads(cand)
+            except Exception:
+                continue
+            if isinstance(obj, dict):
+                args = obj
+                break
+        return {"name": named.group("name"), "arguments": args or {}}
+    return None
 
 
 async def _stream_ollama_text_tools(real_model: str, body: dict,
@@ -555,14 +669,6 @@ async def _stream_ollama_text_tools(real_model: str, body: dict,
 
     payload = {"model": real_model, "messages": msgs, "stream": True, "keep_alive": "30m"}
     text_parts = []
-    # 围栏格式多样：```tool_call / ```tool-call / ```toolcall / ```json / ```（裸）
-    # 小模型常写成 ```json {...} ```，必须一并识别，否则工具调用会漏成普通文本
-    fence_res = [
-        re.compile(r"```(?:tool_call|tool-call|toolcall)\s*(\{.*?\})\s*```",
-                   re.DOTALL | re.IGNORECASE),
-        re.compile(r"```json\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE),
-        re.compile(r"```\s*(\{.*?\})\s*```", re.DOTALL | re.IGNORECASE),
-    ]
 
     async with httpx.AsyncClient(timeout=300) as cli:
         async with cli.stream("POST", f"{OLLAMA_BASE}/api/chat", json=payload) as r:
@@ -584,33 +690,7 @@ async def _stream_ollama_text_tools(real_model: str, body: dict,
     if not text.strip():
         return
 
-    call = None
-    for rx in fence_res:
-        m = rx.search(text)
-        if not m:
-            continue
-        raw = m.group(1).strip()
-        try:
-            obj = json.loads(raw)
-        except Exception:
-            # 修掉尾逗号等常见小毛病
-            try:
-                obj = json.loads(re.sub(r",\s*([}\]])", r"\1", raw))
-            except Exception:
-                continue
-        if isinstance(obj, dict) and obj.get("name"):
-            call = obj
-            break
-    if call is None:
-        # 小模型经常不写围栏，直接输出裸 JSON → 兜底解析
-        stripped = text.strip()
-        if stripped.startswith("{") and '"name"' in stripped:
-            try:
-                obj = json.loads(stripped)
-                if isinstance(obj, dict) and obj.get("name"):
-                    call = obj
-            except Exception:
-                call = None
+    call = _parse_tool_call_text(text)
 
     if call is None:
         # 不是工具调用 → 原样作为文本输出

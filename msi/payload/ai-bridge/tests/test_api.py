@@ -28,6 +28,11 @@ def test_client(mock_config):
         mock_bm.start = AsyncMock()
         mock_bm.stop = AsyncMock()
         mock_bm.clear_site = AsyncMock()
+        # cooldown_remaining 必须返回数字：MagicMock 与 int 比较会抛
+        # TypeError，导致 /v1/chat/completions 整个 500
+        mock_rl.cooldown_remaining = MagicMock(return_value=0)
+        mock_rl.check = MagicMock(return_value=(True, ""))
+        mock_rl.reset_site = MagicMock()
 
         import main as main_module
         main_module.config = mock_config
@@ -57,10 +62,20 @@ class TestHealthEndpoint:
 
         resp = client.get("/")
         assert resp.status_code == 200
-        data = resp.json()
-        assert "sites" in data
-        assert "models" in data
-        assert "poe" in data["sites"]
+        # / 现在返回 HTML 管理页（不是 JSON）
+        assert "text/html" in resp.headers.get("content-type", "")
+        html = resp.text
+        # 页面里应能看到启用站点
+        assert "poe" in html
+
+    def test_root_escapes_site_url_in_html(self, test_client):
+        """站点 URL 来自 sites.yaml，拼进 HTML 前必须转义（防 XSS）"""
+        client, mock_config, *_ = test_client
+        mock_config.sites[0].url = 'https://evil.example/"><script>alert(1)</script>'
+        resp = client.get("/")
+        assert resp.status_code == 200
+        assert "<script>alert(1)</script>" not in resp.text
+        assert "&quot;" in resp.text or "&#x27;" in resp.text or "&quot" in resp.text
 
 
 class TestModelsEndpoint:
@@ -94,10 +109,22 @@ class TestModelsEndpoint:
         mock_config.API_KEY = ""
 
         resp = client.get("/v1/models")
-        data = resp.json()
-        model_ids = [m["id"] for m in data["data"]]
-        assert "poe/gpt-4o" in model_ids
-        assert "poe/claude-3-5-sonnet" in model_ids
+        model_ids = [m["id"] for m in resp.json()["data"]]
+        # 契约：一个桥接站点 = 一个模型，ID = 站点名
+        # （模型明细由 /sites/models 提供，不再拼成 site/model）
+        assert "poe" in model_ids
+        # 不应再出现拼接形式
+        assert "poe/gpt-4o" not in model_ids
+
+    def test_list_models_excludes_logged_out_sites(self, test_client):
+        """登录态已失效的站点不应暴露给 IDE（选了必然失败）"""
+        client, mock_config, *_ = test_client
+        mock_config.API_KEY = ""
+        with patch("browser.profile_manager.get_login_status",
+                   return_value=False):
+            resp = client.get("/v1/models")
+        model_ids = [m["id"] for m in resp.json()["data"]]
+        assert model_ids == []
 
 
 class TestChatCompletionsEndpoint:

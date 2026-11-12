@@ -121,14 +121,26 @@ class GenericProvider:
         """
         from config import config
 
-        wait_time = await self.limiter.acquire(self.site.name)
+        # reserve=True：检查与占用配额是原子操作，
+        # 否则并发请求会同时通过限流检查（TOCTOU），实际请求数超限。
+        # 用 token 精确配对：谁预留谁消费/归还，
+        # 避免并发下互相偷走配额槽位。
+        token, wait_time = await self.limiter.acquire_with_token(self.site.name, reserve=True)
         if wait_time < 0:
             yield "[ERROR] 达到每日请求限制"
             return
         if wait_time > 0:
             console.print(f"[cyan]⏳ 等待 {wait_time:.0f}s...[/cyan]")
             await asyncio.sleep(wait_time)
+            # 等待期间配额状态可能变化，重新检查并（必要时）重新预留
+            token, wait_time = await self.limiter.acquire_with_token(self.site.name, reserve=True)
+            if wait_time < 0:
+                yield "[ERROR] 达到每日请求限制"
+                return
+            if wait_time > 0:
+                await asyncio.sleep(wait_time)
 
+        reserved = token is not None
         try:
             page = await browser_manager.get_page(self.site.name)
             human = HumanBehavior(page, config)
@@ -202,7 +214,7 @@ class GenericProvider:
 
             await self._send_message(page, human)
 
-            await self.limiter.record_request(self.site.name)
+            await self.limiter.record_request(self.site.name, token)
 
             await asyncio.sleep(1)
             ok = await self.security.check_and_handle(page, self.site.name, captcha_wait_minutes)
@@ -253,6 +265,13 @@ class GenericProvider:
                     pass
             console.print(f"[red]❌ 错误: {msg[:80]}[/red]")
             yield f"[ERROR] {msg}"
+        finally:
+            # 预留的配额必须释放：
+            #  - 正常路径 record_request() 已经消费掉了（token 已移除）
+            #  - 异常/提前 return 的路径必须在这里还回去，
+            #    否则配额会被"泄漏"，站点会被误判为达到限额
+            if reserved and token is not None:
+                await self.limiter.release_reservation(self.site.name, token)
 
     async def _check_login_required(self, page) -> bool:
         """检测当前页面是否需要登录，返回 True 表示需要登录。

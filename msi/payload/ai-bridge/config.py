@@ -72,11 +72,21 @@ class CaptchaIndicator:
 
 
 class Config:
-    HOST = os.getenv("HOST", "0.0.0.0")
+    # 默认只监听本机。
+    # 之前默认 0.0.0.0 —— 桥接在同网段内无鉴权可被任意设备调用
+    # （代理用户的所有模型请求、读取/写入 sites.yaml、打开本地浏览器）。
+    # 要对外提供服务必须显式设置 HOST=0.0.0.0 **并**设置 API_KEY。
+    HOST = os.getenv("HOST", "127.0.0.1")
     PORT = int(os.getenv("PORT", 8080))
     API_KEY = os.getenv("API_KEY", "")  # 留空则不校验，本地使用无需配置
     HEADLESS = os.getenv("HEADLESS", "false").lower() == "true"
     DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+
+    @property
+    def is_public_bind(self) -> bool:
+        """是否监听在非回环地址上"""
+        h = (self.HOST or "").lower()
+        return h not in ("127.0.0.1", "localhost", "::1")
 
     def __init__(self):
         self.global_rate_limit = RateLimitConfig()
@@ -88,6 +98,16 @@ class Config:
         self._load_yaml()
 
     def _load_yaml(self):
+        """从 sites.yaml 重新加载配置。
+
+        ⚠ 必须先清空再填充 —— 否则每次热重载（/sites/add、/sites/remove）
+        都会把整个站点列表**追加**一份，内存里的站点数成倍增长：
+          加载 1 次 → 24 个站点
+          加载 2 次 → 48 个（每个站点出现两遍）
+          加载 3 次 → 72 个
+        后果：/v1/models 出现重复模型 ID、限流按站点名统计被放大、
+        站点选择器轮询到重复条目，CPU 与内存持续增长。
+        """
         yaml_path = BASE_DIR / "sites.yaml"
         if not yaml_path.exists():
             return
@@ -106,6 +126,9 @@ class Config:
         if "security" in g:
             self.security = SecurityConfig(**g["security"])
 
+        # 先构建到局部变量，最后整体替换 —— 避免中途失败留下"半新半旧"的列表
+        new_sites: List[SiteConfig] = []
+        seen_names = set()
         for site_data in data.get("sites", []):
             site_data = dict(site_data)
             rate_limit = None
@@ -121,15 +144,22 @@ class Config:
                 models=site_data.get("models", {}),
                 rate_limit=rate_limit,
             )
-            if site.enabled and site.url:
-                self.sites.append(site)
+            if not site.enabled or not site.url:
+                continue
+            # 同名站点只保留第一个 —— 站点名即模型 ID，重名会让 IDE 里
+            # 出现多个一模一样的模型项，且限流统计被放大
+            if site.name in seen_names:
+                continue
+            seen_names.add(site.name)
+            new_sites.append(site)
 
-        self.sites.sort(key=lambda x: x.priority)
+        new_sites.sort(key=lambda x: x.priority)
+        self.sites = new_sites
 
-        for ci in data.get("captcha_indicators", []):
-            self.captcha_indicators.append(
-                CaptchaIndicator(selector=ci["selector"], name=ci["name"])
-            )
+        self.captcha_indicators = [
+            CaptchaIndicator(selector=ci["selector"], name=ci["name"])
+            for ci in data.get("captcha_indicators", [])
+        ]
 
     def get_site(self, name: str) -> Optional[SiteConfig]:
         for site in self.sites:

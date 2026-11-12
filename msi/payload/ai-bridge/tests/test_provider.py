@@ -199,7 +199,10 @@ class TestChatFlow:
             async for chunk in provider.chat([Message(role="user", content="test")]):
                 chunks.append(chunk)
 
-        mock_page.goto.assert_called_once_with(site.url, wait_until="domcontentloaded")
+        # goto 现在带 timeout 参数（导航失败会重试），断言时需匹配
+        mock_page.goto.assert_called_once_with(site.url,
+                                               wait_until="domcontentloaded",
+                                               timeout=30000)
 
     @pytest.mark.asyncio
     async def test_chat_sends_message_and_streams_response(self, mock_config, mock_page, mock_element):

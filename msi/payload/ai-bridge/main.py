@@ -2,31 +2,38 @@
 fix Unicode encoding for Windows console (Python 3.14 + Windows GBK)
 """
 import sys
-import io
 import os as _os
+
 if sys.platform == "win32":
     # pythonw(无控制台)环境下 sys.stdout/stderr 为 None，后续 rich/uvicorn 会崩
     if sys.stdout is None:
         sys.stdout = open(_os.devnull, "w", encoding="utf-8")
     if sys.stderr is None:
         sys.stderr = open(_os.devnull, "w", encoding="utf-8")
-    try:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+
+    # 用 reconfigure 而不是包一层 TextIOWrapper。
+    # 原因：TextIOWrapper 会接管底层 buffer 的所有权，被 GC 时连带关闭
+    # 原始 buffer —— 在 pytest 下会关掉 pytest 的 capture 流，
+    # 导致后续所有测试报 "ValueError: I/O operation on closed file"。
+    # reconfigure 只改编码，不改变所有权，语义相同且安全。
+    for _stream in (sys.stdout, sys.stderr):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
 
 import asyncio
 import json
 import re
 import time
 import uuid
+import html
 import threading
 from contextlib import asynccontextmanager
 from typing import List, Optional, AsyncGenerator, Union
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Header, Request
+from fastapi import FastAPI, HTTPException, Header, Request, Depends
 from fastapi.responses import StreamingResponse, HTMLResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -220,6 +227,18 @@ def resolve_site_model(model: Optional[str]):
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     console.print("[bold cyan]\n╔══════════════════════════════╗\n║  🛡️  Bridge  v2.0.0      ║\n╚══════════════════════════════╝[/bold cyan]")
+
+    # 安全护栏：对外监听（0.0.0.0 / 局域网地址）且没设 API_KEY 时，
+    # 等于把「代理用户所有模型请求 + 可写 sites.yaml + 可开本地浏览器」
+    # 的接口暴露给整个网络。直接拒绝启动，强制用户显式配置。
+    if getattr(config, "is_public_bind", False) and not config.API_KEY:
+        raise RuntimeError(
+            f"拒绝启动：HOST={config.HOST} 会让服务暴露到局域网，"
+            "但没有设置 API_KEY。\n"
+            "  · 仅本机使用 → 把 .env 里的 HOST 改成 127.0.0.1\n"
+            "  · 需要局域网访问 → 设置 API_KEY=<随机长字符串>，客户端需带上 "
+            "Authorization: Bearer <key>")
+
     await browser_manager.start()
     sites = config.get_enabled_sites()
     console.print(f"[green]✅ 已加载 {len(sites)} 个站点[/green]")
@@ -232,41 +251,122 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Bridge", description="AI 模型网页桥接器", version="2.0.0", lifespan=lifespan)
 
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+# CORS：服务只监听本机时放开无所谓；一旦对外监听且有 API_KEY，
+# 就不允许任意来源带凭据跨域（否则网页端就能拿用户的 Key 调桥接）。
+if getattr(config, "is_public_bind", False) and config.API_KEY:
+    app.add_middleware(CORSMiddleware, allow_origins=[],
+                       allow_methods=["*"], allow_headers=["*"])
+else:
+    app.add_middleware(CORSMiddleware, allow_origins=["*"],
+                       allow_methods=["*"], allow_headers=["*"])
+
+
+def _strip_bearer(auth: str) -> str:
+    """去掉 Bearer 前缀（大小写不敏感）。
+
+    RFC 7235 规定 scheme 不区分大小写，客户端发 "bearer xxx" 是合法的；
+    只 replace("Bearer ", "") 会让这类请求莫名其妙 401。
+    """
+    auth = auth.strip()
+    if len(auth) >= 7 and auth[:7].lower() == "bearer ":
+        return auth[7:].strip()
+    return auth
 
 
 def verify_key(authorization: Optional[str] = None):
+    """校验 Authorization: Bearer <key>（仅供 /v1/* 这类纯 API 路由使用）"""
     if not config.API_KEY:
         return
     if not authorization:
         raise HTTPException(401, "Missing Authorization")
-    token = authorization.replace("Bearer ", "")
+    token = _strip_bearer(authorization)
     if token != config.API_KEY:
         raise HTTPException(401, "Invalid API Key")
 
 
+# 管理页 / 管理类接口的鉴权 Cookie 名
+ADMIN_COOKIE = "bridge_admin_key"
+
+
+def _extract_key(request: Request) -> Optional[str]:
+    """从请求里提取 API Key，支持三种来源：
+      1. Authorization: Bearer <key>   （IDE / 脚本）
+      2. X-API-Key: <key>              （浏览器 fetch）
+      3. Cookie: bridge_admin_key=<key>（管理页登录态）
+    """
+    auth = request.headers.get("authorization")
+    if auth:
+        return _strip_bearer(auth)
+    xk = request.headers.get("x-api-key")
+    if xk:
+        return xk.strip()
+    ck = request.cookies.get(ADMIN_COOKIE)
+    if ck:
+        return ck.strip()
+    return None
+
+
+async def require_key(request: Request):
+    """管理类接口的统一鉴权。
+
+    没配 API_KEY 时直接放行（默认只监听 127.0.0.1，本机自用场景）。
+    配了 API_KEY 就必须带正确的 Key，否则 401。
+
+    ⚠ 必须以「依赖注入」的方式挂到路由上（dependencies=[Depends(require_key)]），
+    不能只在 handler 函数体第一行调用 —— 因为 FastAPI 会先做请求体
+    校验（Pydantic），请求体不合法时直接返回 422，
+    handler 里的鉴权代码根本不会执行 → 鉴权被绕过。
+    """
+    if not config.API_KEY:
+        return
+    token = _extract_key(request)
+    if not token or token != config.API_KEY:
+        raise HTTPException(401, "Invalid or missing API Key")
+
+
+# 路由级鉴权依赖：挂在 dependencies 上，保证在请求体解析之前就拦下
+admin_auth = [Depends(require_key)]
+
+
 @app.get("/", response_class=HTMLResponse)
-async def root():
+async def root(request: Request):
+    # 配了 API_KEY 时，页面本身也必须鉴权 —— 页面里包含全部站点地址、
+    # 登录状态、可用模型等信息，不该在局域网里裸奔。
+    if config.API_KEY and _extract_key(request) != config.API_KEY:
+        return HTMLResponse(_admin_lock_html(), status_code=401)
     sites = config.get_enabled_sites()
-    models = load_balancer.get_available_models()
 
     # 需登录站点集合已提取为模块级 LOGIN_REQUIRED_SITES（venice 免登录）
     LOGIN_REQUIRED = LOGIN_REQUIRED_SITES
 
+    # 站点字段（name/url/模型名）来自 sites.yaml，而 sites.yaml 可被
+    # POST /sites/add 以任意内容写入 —— 必须转义后再拼进 HTML，
+    # 否则注入的 name/url 会变成可执行脚本（存储型 XSS）。
+    def _esc(v):
+        return html.escape(str(v), quote=True)
+
+    def _js(v):
+        """放进 JS 字符串字面量里的值：转义引号与反斜杠，防止提前闭合字符串"""
+        return (str(v).replace("\\", "\\\\")
+                .replace("'", "\\'")
+                .replace("\r", "\\r")
+                .replace("\n", "\\n"))
+
     def _model_tags(s):
-        return "".join(f'<span class="mtag">{m}</span>' for m in s.models.keys()) or "-"
+        return "".join(f'<span class="mtag">{_esc(m)}</span>'
+                       for m in s.models.keys()) or "-"
 
     def _login_badge(s):
         if s.name in LOGIN_REQUIRED:
-            return (f'<a href="{s.url}" target="_blank" '
+            return (f'<a href="{_esc(s.url)}" target="_blank" '
                     f'style="color:#fbbf24;font-size:.75rem;text-decoration:none" '
                     f'title="需要先登录该网站才能使用">⚠ 需登录</a>')
         return '<span style="color:#22c55e;font-size:.75rem">✓ 免登录</span>'
 
     def _site_row(s):
         return (f'<tr>'
-                f'<td>{s.name}</td>'
-                f'<td><a href="{s.url}" target="_blank">{s.url}</a></td>'
+                f'<td>{_esc(s.name)}</td>'
+                f'<td><a href="{_esc(s.url)}" target="_blank">{_esc(s.url)}</a></td>'
                 f'<td>{_login_badge(s)}</td>'
                 f'<td>{_model_tags(s)}</td>'
                 f'</tr>')
@@ -279,27 +379,26 @@ async def root():
     pending_rows = "".join(_site_row(s) for s in phone_sites)
 
     def _email_login_row(s):
-        return (f'<tr data-site="{s.name}">'
-                f'<td style="white-space:nowrap"><strong>{s.name}</strong></td>'
+        return (f'<tr data-site="{_esc(s.name)}">'
+                f'<td style="white-space:nowrap"><strong>{_esc(s.name)}</strong></td>'
                 f'<td>'
                 f'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
                 f'<input class="al-email" type="email" placeholder="邮箱" style="background:#0f1117;border:1px solid #334155;color:#e2e8f0;border-radius:5px;padding:5px 8px;font-size:.8rem;width:170px">'
                 f'<input class="al-pass" type="password" placeholder="密码" style="background:#0f1117;border:1px solid #334155;color:#e2e8f0;border-radius:5px;padding:5px 8px;font-size:.8rem;width:130px">'
-                f'<button class="btn al-go" onclick="autoLogin(\'{s.name}\', this)" style="background:#7c3aed;color:#fff;border:none;border-radius:5px;padding:5px 12px;font-size:.8rem;cursor:pointer">自动登录</button>'
+                f'<button class="btn al-go" onclick="autoLogin(\'{_js(s.name)}\', this)" style="background:#7c3aed;color:#fff;border:none;border-radius:5px;padding:5px 12px;font-size:.8rem;cursor:pointer">自动登录</button>'
                 f'</div>'
                 f'<div class="al-code-row" style="display:none;margin-top:6px;gap:6px;align-items:center">'
                 f'<input class="al-code" type="text" placeholder="邮件验证码" style="background:#0f1117;border:1px solid #334155;color:#e2e8f0;border-radius:5px;padding:5px 8px;font-size:.8rem;width:170px">'
-                f'<button class="btn al-code-go" onclick="autoLoginCode(\'{s.name}\', this)" style="background:#166534;color:#86efac;border:none;border-radius:5px;padding:5px 12px;font-size:.8rem;cursor:pointer">提交验证码</button>'
+                f'<button class="btn al-code-go" onclick="autoLoginCode(\'{_js(s.name)}\', this)" style="background:#166534;color:#86efac;border:none;border-radius:5px;padding:5px 12px;font-size:.8rem;cursor:pointer">提交验证码</button>'
                 f'</div>'
                 f'<div class="al-status" style="color:#64748b;font-size:.75rem;margin-top:4px">未登录 · 填入邮箱密码后点自动登录</div>'
                 f'</td>'
-                f'<td><a href="{s.url}" target="_blank" style="color:#60a5fa;font-size:.75rem" '
-                f'onclick="openForManualLogin(\'{s.name}\');return true">打开站点</a></td>'
+                f'<td><a href="{_esc(s.url)}" target="_blank" style="color:#60a5fa;font-size:.75rem" '
+                f'onclick="openForManualLogin(\'{_js(s.name)}\');return true">打开站点</a></td>'
                 f'</tr>')
 
     email_rows = "".join(_email_login_row(s) for s in email_sites)
     # API 暴露的模型 = 站点名（与 /v1/models 一致）
-    model_tags = "".join(f'<span class="tag">{m}</span>' for m in get_site_model_ids())
 
     ide_icons = {
         "kiro":     '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="9"/><path d="M12 3 C8 7 8 17 12 21"/><path d="M12 3 C16 7 16 17 12 21"/><circle cx="12" cy="12" r="2" fill="currentColor"/></svg>',
@@ -677,7 +776,33 @@ export ANTHROPIC_API_KEY=any-key</pre>
   </div>
 </div>
 <script>
+// ── API Key 透传 ────────────────────────────────────────────
+// 服务端配置了 API_KEY 时，管理页的所有 fetch 都必须带上 X-API-Key，
+// 否则 /sites/add、/ide/configure 等管理接口会返回 401。
+// 用包装原生 fetch 的方式统一注入，页面里所有已有调用无需改动。
+(function(){{
+  var _key = '';
+  try {{ _key = localStorage.getItem('bridge_api_key') || ''; }} catch(e) {{}}
+  if (!_key) return;                       // 没配 API_KEY 时无需注入
+  var _origFetch = window.fetch.bind(window);
+  window.fetch = function(input, init){{
+    try {{
+      init = init || {{}};
+      init.headers = new Headers(init.headers || {{}});
+      if (!init.headers.has('X-API-Key')) init.headers.set('X-API-Key', _key);
+      init.credentials = init.credentials || 'same-origin';
+    }} catch(e) {{ /* 忽略，走原始请求 */ }}
+    return _origFetch(input, init);
+  }};
+}})();
 const IDE_SVGS = {ide_svgs_json};
+// HTML 转义助手：所有来自后端 / 网关的动态字符串在拼进 innerHTML 前
+// 必须过这一道，否则 label / id 里的引号就能闭合属性并注入事件处理器。
+function _esc(v){{
+  return String(v == null ? '' : v)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#x27;');
+}}
 const ALL_IDES = [
   {{key:'kiro',name:'Kiro'}},{{key:'zed',name:'Zed'}},{{key:'code',name:'VSCode'}},
   {{key:'claude',name:'Claude'}},{{key:'cursor',name:'Cursor'}},{{key:'windsurf',name:'Windsurf'}},
@@ -1094,14 +1219,16 @@ async function loadMarket() {{
       const isInstalled = !!installed[c.ollama_id];
       const job = d.pull_jobs[c.ollama_id];
       const f = FIT[c.fit] || FIT.unknown;
-      return '<div class="mkt-item"><div><span class="nm">' + c.label + '</span>' +
+      // 网关返回的数据一律转义后再拼进 HTML ——
+      // local_models.json 的 key 来自用户输入，未转义时能注入脚本。
+      return '<div class="mkt-item"><div><span class="nm">' + _esc(c.label) + '</span>' +
         '<span class="tag" style="background:' + f[1] + ';color:' + f[2] + '">' + f[0] + '</span>' +
         (isInstalled ? '<span class="tag tag-ok">已装</span>' : '') +
         (job && job.status === 'pulling' ? '<span class="tag tag-pending">拉取中…</span>' : '') +
-        '<div class="full">' + c.note + ' · ' + (c.speed || '') + ' · ' + (c.reason || '') + '</div></div>' +
+        '<div class="full">' + _esc(c.note) + ' · ' + _esc(c.speed || '') + ' · ' + _esc(c.reason || '') + '</div></div>' +
         (isInstalled ? '<button class="mkt-btn" disabled>已接入</button>'
           : (c.fit === 'not_recommended' ? '<span class="tag" style="color:#475569">本机不支持</span>'
-          : '<button class="mkt-btn" onclick="pullModel(\\'' + c.ollama_id + '\\', this)">拉取并接入</button>')) +
+          : '<button class="mkt-btn" onclick="pullModel(\\'' + _esc(c.ollama_id) + '\\', this)">拉取并接入</button>')) +
         '</div>';
     }}).join('');
   }} catch(e) {{ localBox.textContent = '网关未运行(8787)，无法加载本地模型列表'; }}
@@ -1111,7 +1238,7 @@ async function loadMarket() {{
     const d2 = await r2.json();
     const orids = d2.data.map(x => x.id).filter(i => i.indexOf('or/') === 0);
     freeBox.innerHTML = orids.length
-      ? orids.map(i => '<div class="mkt-item"><div><span class="nm">' + i + '</span></div><span class="tag tag-ok">免费可用</span></div>').join('')
+      ? orids.map(i => '<div class="mkt-item"><div><span class="nm">' + _esc(i) + '</span></div><span class="tag tag-ok">免费可用</span></div>').join('')
       : '暂无免费模型';
   }} catch(e) {{ freeBox.textContent = '网关未运行(8787)，无法加载免费模型列表'; }}
 }}
@@ -1181,6 +1308,71 @@ document.querySelectorAll('.tab').forEach(function(tab){{
 </html>""".replace("{ide_svgs_json}", ide_svgs_json))
 
 
+def _admin_lock_html() -> str:
+    """管理页未鉴权时返回的"输入 API Key"页面"""
+    return """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Bridge · 需要 API Key</title>
+<style>
+  body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+       background:#0f172a;color:#e2e8f0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif}
+  .card{background:#1e293b;border:1px solid #334155;border-radius:14px;padding:32px 28px;
+        width:min(420px,92vw);box-shadow:0 20px 50px rgba(0,0,0,.45)}
+  h1{margin:0 0 6px;font-size:1.15rem}
+  p{margin:0 0 18px;color:#94a3b8;font-size:.86rem;line-height:1.6}
+  input{width:100%;box-sizing:border-box;padding:10px 12px;border-radius:9px;
+        border:1px solid #475569;background:#0f172a;color:#e2e8f0;font-size:.92rem}
+  button{width:100%;margin-top:14px;padding:10px 12px;border:0;border-radius:9px;
+         background:#2563eb;color:#fff;font-size:.92rem;cursor:pointer;font-weight:600}
+  button:hover{background:#1d4ed8}
+  .err{color:#f87171;font-size:.82rem;margin-top:10px;min-height:1.1em}
+  code{background:#0f172a;padding:1px 5px;border-radius:4px;color:#7dd3fc}
+</style></head><body>
+<div class="card">
+  <h1>🔒 Bridge 管理页需要鉴权</h1>
+  <p>本服务已配置 <code>API_KEY</code>。请输入 Key 以继续访问管理页。<br>
+     Key 在项目根目录的 <code>.env</code> 文件里（<code>API_KEY=...</code>）。</p>
+  <form id="f" autocomplete="off">
+    <input id="k" type="password" placeholder="粘贴 API Key" autofocus>
+    <button type="submit">解锁</button>
+  </form>
+  <div class="err" id="e"></div>
+</div>
+<script>
+document.getElementById('f').addEventListener('submit', async function(e){
+  e.preventDefault();
+  const key = document.getElementById('k').value.trim();
+  if(!key){ document.getElementById('e').textContent='请输入 API Key'; return; }
+  const r = await fetch('/admin/unlock',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({key:key})});
+  if(r.ok){ try{ localStorage.setItem('bridge_api_key', key); }catch(e){} location.href='/'; }
+  else { document.getElementById('e').textContent='Key 不正确'; }
+});
+</script>
+</body></html>"""
+
+
+@app.post("/admin/unlock")
+async def admin_unlock(request: Request):
+    """校验管理页输入的 API Key，通过则下发 Cookie 并放行"""
+    if not config.API_KEY:
+        return {"success": True}
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    key = (body.get("key") or "").strip()
+    if not key or key != config.API_KEY:
+        raise HTTPException(401, "Invalid API Key")
+    resp = JSONResponse({"success": True})
+    # HttpOnly 防止 XSS 读取；SameSite=Strict 彻底阻断跨站带凭据请求
+    # （Strict 相比 Lax 还能挡住"跨站顶层导航 GET"型 CSRF，
+    #   例如诱导浏览器访问 /sites/discover 触发无头浏览器批量拉起）
+    resp.set_cookie(ADMIN_COOKIE, key, httponly=True, samesite="strict", path="/")
+    return resp
+
+
 
 @app.get("/favicon.ico", include_in_schema=False)
 async def favicon():
@@ -1210,8 +1402,8 @@ async def health():
     return {"status": "ok", "timestamp": int(time.time())}
 
 
-@app.get("/login/status")
-async def login_status():
+@app.get("/login/status", dependencies=admin_auth)
+async def login_status(request: Request):
     """获取所有站点的登录状态"""
     from browser import profile_manager
     status = profile_manager.get_all_login_status()
@@ -1234,7 +1426,7 @@ async def login_status():
 # 若站点改为邮箱验证码模式（邮箱密码无密码框），用 /autologin/{site}/code 填码
 
 
-@app.post("/autologin/{site_name}")
+@app.post("/autologin/{site_name}", dependencies=admin_auth)
 async def autologin_email(site_name: str, request: Request):
     """用邮箱+密码自动登录指定站点"""
     from browser import profile_manager, browser_manager
@@ -1384,7 +1576,7 @@ async def autologin_email(site_name: str, request: Request):
             "message": "登录未完成（可能有图形验证码或 SSO 限制），可点'打开站点'手动登录一次"}
 
 
-@app.post("/autologin/{site_name}/code")
+@app.post("/autologin/{site_name}/code", dependencies=admin_auth)
 async def autologin_code(site_name: str, request: Request):
     """邮箱/短信验证码阶段：填入验证码完成登录"""
     from browser import profile_manager, browser_manager
@@ -1452,8 +1644,8 @@ async def autologin_code(site_name: str, request: Request):
     return {"success": False, "message": "验证码提交后未检测到登录态，请确认验证码是否正确或手动完成"}
 
 
-@app.post("/zed/refresh-models")
-async def zed_refresh_models():
+@app.post("/zed/refresh-models", dependencies=admin_auth)
+async def zed_refresh_models(request: Request):
     """只更新 Zed settings.json 的三组模型列表，不重启 Zed、不动其他配置。
     供管理页「模型市场」的一键加载使用。"""
     import httpx as _hx
@@ -1525,8 +1717,8 @@ _batch_login_state = {
 }
 
 
-@app.post("/login/batch")
-async def login_batch(sites: Optional[str] = None, timeout_minutes: int = 10,
+@app.post("/login/batch", dependencies=admin_auth)
+async def login_batch(request: Request, sites: Optional[str] = None, timeout_minutes: int = 10,
                       background: bool = True):
     """批量登录多个站点（依次弹出可见浏览器窗口）。
 
@@ -1536,6 +1728,14 @@ async def login_batch(sites: Optional[str] = None, timeout_minutes: int = 10,
     """
     from browser import profile_manager
 
+    # 并发保护必须放在最前面：
+    # 否则重复调用时若本次筛出的站点列表为空，会先走到
+    # 「没有需要登录的站点」分支而返回 success=True，
+    # 掩盖掉「已有任务在跑」的真实状态。
+    if _batch_login_state["running"]:
+        return {"success": False, "message": "已有批量登录任务在运行中",
+                "state": dict(_batch_login_state)}
+
     if sites:
         names = [s.strip() for s in sites.split(",") if s.strip()]
     else:
@@ -1544,10 +1744,6 @@ async def login_batch(sites: Optional[str] = None, timeout_minutes: int = 10,
 
     if not names:
         return {"success": True, "results": [], "message": "没有需要登录的站点"}
-
-    if _batch_login_state["running"]:
-        return {"success": False, "message": "已有批量登录任务在运行中",
-                "state": dict(_batch_login_state)}
 
     names = [n for n in names if config.get_site(n)]
     _batch_login_state.update({
@@ -1597,8 +1793,8 @@ async def login_batch(sites: Optional[str] = None, timeout_minutes: int = 10,
     }
 
 
-@app.get("/login/batch/status")
-async def login_batch_status():
+@app.get("/login/batch/status", dependencies=admin_auth)
+async def login_batch_status(request: Request):
     """批量登录进度（供管理页轮询）。"""
     st = dict(_batch_login_state)
     results = st.get("results") or []
@@ -1609,8 +1805,26 @@ async def login_batch_status():
     return st
 
 
-@app.post("/login/{site_name}")
-async def login_site(site_name: str, timeout_minutes: int = 10):
+@app.post("/login/open", dependencies=admin_auth)
+async def login_open(request: Request, url: str):
+    """用系统默认浏览器打开登录页面
+
+    必须定义在 /login/{site_name} 之前，否则会被路径参数路由吞掉
+    （实测 POST /login/open 返回 404「站点 open 不存在」）。
+    """
+    import webbrowser
+    # 只允许 http/https，避免 file:// 等本地协议被诱导打开
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return {"success": False, "error": "仅允许 http/https 链接"}
+    try:
+        webbrowser.open(url)
+        return {"success": True}
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+
+@app.post("/login/{site_name}", dependencies=admin_auth)
+async def login_site(request: Request, site_name: str, timeout_minutes: int = 10):
     """
     一键登录指定站点
     - 如果已有 Profile 且登录有效，直接使用（浏览器保持无头，不弹窗）
@@ -1773,13 +1987,34 @@ async def chat_completions(request: ChatRequest, authorization: Optional[str] = 
         console.print(f"[cyan]📨 [gateway-proxy] {rm} stream={request.stream} "
                      f"tools={len(request.tools or [])}[/cyan]")
         openai_msgs = []
+        total_chars = 0
+        MAX_GATEWAY_MSG = 8000       # 单条上限
+        MAX_GATEWAY_TOTAL = 60000    # 总长上限
         for m in request.messages:
-            d = {"role": m.role, "content": m.get_text()}
+            text = m.get_text()
+            # 上下文护栏：IDE 会发来几万字上下文，无限转发会让
+            # 本地模型长时间无响应（实测 100k 字符会挂住整条请求）。
+            # 与网页桥接的瘦身策略一致：保留最近的消息，截断超长单条。
+            if len(text) > MAX_GATEWAY_MSG:
+                text = text[:MAX_GATEWAY_MSG]
+            d = {"role": m.role, "content": text}
             if m.tool_calls:
                 d["tool_calls"] = m.tool_calls
             if m.name:
                 d["name"] = m.name
             openai_msgs.append(d)
+            total_chars += len(text)
+        if total_chars > MAX_GATEWAY_TOTAL:
+            console.print(f"[yellow]⚠️ 上下文过长({total_chars} 字符)，"
+                          f"截断到 {MAX_GATEWAY_TOTAL}[/yellow]")
+            kept, acc = [], 0
+            for d in reversed(openai_msgs):
+                acc += len(d.get("content") or "")
+                kept.append(d)
+                if acc >= MAX_GATEWAY_TOTAL:
+                    break
+            kept.reverse()
+            openai_msgs = kept
         return await _gateway_proxy(openai_msgs, request.stream, requested_model=rm,
                                     tools=request.tools)
 
@@ -2046,21 +2281,10 @@ def _record_usage(site: str, model: str, success: bool, error: str = None, switc
         _usage_history.pop()
 
 
-@app.get("/usage/recent")
-async def usage_recent():
+@app.get("/usage/recent", dependencies=admin_auth)
+async def usage_recent(request: Request):
     """返回最近的模型使用记录"""
     return {"records": _usage_history[:20]}
-
-
-@app.post("/login/open")
-async def login_open(url: str):
-    """用系统默认浏览器打开登录页面"""
-    import webbrowser
-    try:
-        webbrowser.open(url)
-        return {"success": True}
-    except Exception as e:
-        return {"success": False, "error": str(e)}
 
 
 async def _stream_sse_with_fallback(messages, model_name, original_site, stream) -> AsyncGenerator[bytes, None]:
@@ -2316,17 +2540,16 @@ async def anthropic_messages(request: Request,
     return await _anthropic_messages_impl(body, bool(body.get("stream")))
 
 
-@app.get("/admin/status")
-async def admin_status(authorization: Optional[str] = Header(None)):
-    verify_key(authorization)
+@app.get("/admin/status", dependencies=admin_auth)
+async def admin_status(request: Request, authorization: Optional[str] = Header(None)):
     return {
         "rate_limits": rate_limiter.get_status(),
         "sites": [{"name": s.name, "url": s.url, "priority": s.priority} for s in config.get_enabled_sites()],
     }
 
 
-@app.get("/sites/models")
-async def sites_models():
+@app.get("/sites/models", dependencies=admin_auth)
+async def sites_models(request: Request):
     """直接返回 yaml 配置的静态模型列表，不启动浏览器"""
     return {
         site.name: list(site.models.keys())
@@ -2351,8 +2574,8 @@ _FREE_SITE_CANDIDATES = [
 ]
 
 
-@app.get("/sites/discover")
-async def sites_discover():
+@app.get("/sites/discover", dependencies=admin_auth)
+async def sites_discover(request: Request):
     """后台 headless 探测候选免费站点，全部完成后返回结果"""
     existing_urls = {s.url.rstrip("/") for s in config.get_enabled_sites()}
     existing_names = {s.name for s in config.get_enabled_sites()}
@@ -2374,8 +2597,8 @@ async def sites_discover():
     return {"found": found, "total_checked": len(candidates)}
 
 
-@app.get("/sites/check")
-async def sites_check():
+@app.get("/sites/check", dependencies=admin_auth)
+async def sites_check(request: Request):
     """用轻量 HTTP 请求检测站点可用性，不启动浏览器"""
     import urllib.request as _req
     sites = config.get_enabled_sites()
@@ -2403,11 +2626,73 @@ class SiteAddRequest(BaseModel):
     models: list = []
 
 
-@app.post("/sites/add")
-async def sites_add(req: SiteAddRequest):
+# 站点名：只允许小写字母/数字/连字符，避免 YAML 结构被破坏
+_SITE_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _validate_site_input(name: str, url: str) -> Optional[str]:
+    """校验新增站点的 name / url，返回错误信息（None = 通过）
+
+    这两个字段会被直接拼进 sites.yaml（YAML 源码）与管理页 HTML，
+    不校验等于开放 YAML 注入 + 存储型 XSS。
+    """
+    if not name or not _SITE_NAME_RE.match(name):
+        return ("站点名非法：只允许小写字母、数字、连字符，"
+                "且以字母或数字开头（最多 64 字符）")
+    if len(name) > 64:
+        return "站点名过长"
+    if not url or not (url.startswith("http://") or url.startswith("https://")):
+        return "URL 必须以 http:// 或 https:// 开头"
+    if len(url) > 512:
+        return "URL 过长"
+    # 不允许换行/引号/尖括号等可破坏 YAML 或 HTML 的字符
+    if re.search(r'[\r\n"\'<>\\]', url):
+        return "URL 含非法字符"
+    return None
+
+
+# ── sites.yaml 写入保护 ────────────────────────────────────────
+# /sites/add 与 /sites/remove 都是「读 → 改 → 写」三步，
+# 两个请求并发时会互相覆盖（后写的赢），而且中途崩溃会留下半截文件。
+# 用锁串行化 + 临时文件原子替换杜绝这两类问题。
+_sites_yaml_lock = threading.Lock()
+
+
+def _write_sites_yaml_atomic(yaml_path, content: str):
+    """原子写 sites.yaml：先写临时文件，再 os.replace 覆盖。
+
+    直接 open(w) 覆盖时，进程若在写入中途被杀/断电，
+    文件会变成半截内容 → 下次启动 yaml.safe_load 报错 → 整个服务起不来。
+    """
+    import os
+    import tempfile
+    from pathlib import Path
+    yaml_path = Path(yaml_path)
+    fd, tmp = tempfile.mkstemp(dir=str(yaml_path.parent),
+                               prefix=".sites.", suffix=".yaml.tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, str(yaml_path))
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+@app.post("/sites/add", dependencies=admin_auth)
+async def sites_add(request: Request, req: SiteAddRequest):
     """将用户确认的站点追加到 sites.yaml 并热重载"""
     from pathlib import Path
     yaml_path = Path(__file__).parent / "sites.yaml"
+
+    err = _validate_site_input(req.name, req.url)
+    if err:
+        return {"success": False, "message": err}
 
     if config.get_site(req.name):
         return {"success": False, "message": f"站点 {req.name} 已存在"}
@@ -2416,18 +2701,26 @@ async def sites_add(req: SiteAddRequest):
     next_priority = max((s.priority for s in existing), default=0) + 1
 
     # 构建模型列表：优先用探测到的真实模型，否则用默认
+    # 模型名同样要转义，否则含引号/换行会破坏 YAML 结构
+    def _safe_model_key(m: str) -> str:
+        k = re.sub(r"[^a-z0-9_-]+", "-", str(m).lower()).strip("-")
+        return k or "model"
+
+    def _yaml_quote(v: str) -> str:
+        return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
     if req.models:
         models_yaml = "\n".join(
-            f'      {m.lower().replace(" ", "-").replace("/", "-")}: "{m}"'
+            f'      {_safe_model_key(m)}: {_yaml_quote(m)}'
             for m in req.models[:10]
         )
     else:
-        models_yaml = f'      {req.name}-default: "default"'
+        models_yaml = f'      {_safe_model_key(req.name)}-default: "default"'
 
     new_block = f"""
   - name: {req.name}
     enabled: true
-    url: "{req.url}"
+    url: {_yaml_quote(req.url)}
     priority: {next_priority}
 
     selectors:
@@ -2440,13 +2733,21 @@ async def sites_add(req: SiteAddRequest):
 {models_yaml}
 """
     try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        insert_pos = content.find("\ncaptcha_indicators:")
-        content = content[:insert_pos] + new_block + content[insert_pos:] if insert_pos != -1 else content + new_block
-        with open(yaml_path, "w", encoding="utf-8") as f:
-            f.write(content)
-        config._load_yaml()
+        with _sites_yaml_lock:
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            # 查重必须以 **sites.yaml 的实际内容** 为准，不能只看内存里的 config：
+            # 内存 config 可能还没热重载过（热重载失败 / 被测试打桩 / 并发未完成），
+            # 此时 config.get_site() 查不到 → 并发同名请求会双双通过 →
+            # sites.yaml 里出现重名站点。而站点名就是模型 ID，
+            # 重名会让 IDE 模型列表出现重复项。
+            if re.search(rf'^\s*-\s*name:\s*{re.escape(req.name)}\s*$',
+                         content, re.MULTILINE):
+                return {"success": False, "message": f"站点 {req.name} 已存在"}
+            insert_pos = content.find("\ncaptcha_indicators:")
+            content = content[:insert_pos] + new_block + content[insert_pos:] if insert_pos != -1 else content + new_block
+            _write_sites_yaml_atomic(yaml_path, content)
+            config._load_yaml()
         new_site = config.get_site(req.name)
         new_models = list(new_site.models.keys()) if new_site else []
         return {"success": True, "message": f"已添加站点 {req.name}", "new_models": new_models}
@@ -2454,8 +2755,8 @@ async def sites_add(req: SiteAddRequest):
         return {"success": False, "message": str(e)}
 
 
-@app.post("/sites/remove/{site_name}")
-async def sites_remove(site_name: str):
+@app.post("/sites/remove/{site_name}", dependencies=admin_auth)
+async def sites_remove(request: Request, site_name: str):
     """从 sites.yaml 移除失效站点并热重载"""
     from pathlib import Path
     import re
@@ -2468,16 +2769,16 @@ async def sites_remove(site_name: str):
     removed_models = list(site.models.keys())
 
     try:
-        with open(yaml_path, "r", encoding="utf-8") as f:
-            content = f.read()
-        # 删除该站点的 yaml 块（从 "  - name: xxx" 到下一个 "  - name:" 或文件末尾）
-        pattern = rf'\n  - name: {re.escape(site_name)}\n.*?(?=\n  - name:|\ncaptcha_indicators:|\Z)'
-        content = re.sub(pattern, '', content, flags=re.DOTALL)
-        with open(yaml_path, "w", encoding="utf-8") as f:
-            f.write(content)
+        with _sites_yaml_lock:
+            with open(yaml_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            # 删除该站点的 yaml 块（从 "  - name: xxx" 到下一个 "  - name:" 或文件末尾）
+            pattern = rf'\n  - name: {re.escape(site_name)}\n.*?(?=\n  - name:|\ncaptcha_indicators:|\Z)'
+            content = re.sub(pattern, '', content, flags=re.DOTALL)
+            _write_sites_yaml_atomic(yaml_path, content)
+            config._load_yaml()
         # 清理浏览器 profile
         await browser_manager.clear_site(site_name)
-        config._load_yaml()
         # 计算移除后其他站点还在用的模型，排除掉
         remaining_models = set(load_balancer.get_available_models())
         truly_removed = [m for m in removed_models if m not in remaining_models]
@@ -2486,9 +2787,9 @@ async def sites_remove(site_name: str):
         return {"success": False, "message": str(e)}
 
 
-@app.post("/admin/validate")
-async def admin_validate(site: Optional[str] = None, authorization: Optional[str] = Header(None)):
-    verify_key(authorization)
+@app.post("/admin/validate", dependencies=admin_auth)
+async def admin_validate(request: Request, site: Optional[str] = None,
+                         authorization: Optional[str] = Header(None)):
     if site:
         success, model, error = await validator.validate_site(site)
         return {"site": site, "success": success, "model": model, "error": error}
@@ -2496,17 +2797,17 @@ async def admin_validate(site: Optional[str] = None, authorization: Optional[str
         return {"results": await validator.validate_all()}
 
 
-@app.post("/admin/clear-profile/{site}")
-async def admin_clear_profile(site: str, authorization: Optional[str] = Header(None)):
-    verify_key(authorization)
+@app.post("/admin/clear-profile/{site}", dependencies=admin_auth)
+async def admin_clear_profile(request: Request, site: str,
+                              authorization: Optional[str] = Header(None)):
     await browser_manager.clear_site(site)
     return {"cleared": site}
 
 
 # ─── IDE 接入 ─────────────────────────────────────────────────
 
-@app.get("/ide/detect")
-async def ide_detect():
+@app.get("/ide/detect", dependencies=admin_auth)
+async def ide_detect(request: Request):
     import psutil
     import concurrent.futures
 
@@ -2757,8 +3058,8 @@ async def _restart_ide(ide_key: str, env_vars: dict = None, project_path: str = 
         return False
 
 
-@app.post("/ide/configure/{ide_key}")
-async def ide_configure(ide_key: str, project: Optional[str] = None):
+@app.post("/ide/configure/{ide_key}", dependencies=admin_auth)
+async def ide_configure(request: Request, ide_key: str, project: Optional[str] = None):
     """合并写入 IDE 配置，不影响原有模型和配置。
 
     project: 可选项目路径，zed 启动时打开该项目。
@@ -2784,15 +3085,10 @@ async def ide_configure(ide_key: str, project: Optional[str] = None):
         "autoApprove": ["chat"],
     }
 
-    # ── Claude Code (~/.claude.json) openai provider block ──────
-    # 每个桥接站点暴露为一个模型（ID=站点名）
-    claude_code_block = {
-        "type": "openai",
-        "baseURL": f"{base_url}/v1",
-        "apiKey": api_key,
-        "name": "Bridge",
-        "models": get_site_model_ids(),
-    }
+    # ── Claude Code (~/.claude.json) ──────────────────────────────
+    # 注意：这里**不写入** ~/.claude.json —— 那是用户级全局文件，
+    # 会被 Kiro 等其他 IDE 的 Claude 共用。Claude Code 的接入方式见下方
+    # extra_configs 分支（只给提示 + 由 ide_config.py 注入进程环境变量）。
 
     # ── Zed: language_models.openai_compatible 用命名键（provider id = "bridge"）
     # 环境变量 BRIDGE_API_KEY 自动对应（Zed 从 provider id 生成）
@@ -3146,8 +3442,8 @@ async def ide_configure(ide_key: str, project: Optional[str] = None):
         }
 
 
-@app.post("/ide/refresh-continue")
-async def refresh_continue(restart: bool = False):
+@app.post("/ide/refresh-continue", dependencies=admin_auth)
+async def refresh_continue(request: Request, restart: bool = False):
     """只刷新 Continue 的 config.yaml（不重启 IDE）。
 
     用于站点登录态变化后，把已失效的 bridge 模型从下拉框里剔除、
