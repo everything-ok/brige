@@ -280,11 +280,12 @@ class BrowserManager:
             f"--window-size={1280 + random.randint(-50, 50)},{800 + random.randint(-50, 50)}",
         ]
         # 浏览器可见性（BROWSER_HEADLESS）：
-        #   hidden(默认) = 有头浏览器窗口移到屏幕外，不干扰桌面、且不会被无头指纹识别
-        #   0/visible    = 正常显示窗口（人工登录/过验证码时用）
-        #   1/headless   = 真无头（注意：部分站点反爬会识别并弹验证码）
-        vis_mode = os.getenv("BROWSER_HEADLESS", "hidden").lower()
-        # 手动登录中的站点强制可见（覆盖全局设置）
+        #   1/headless (默认) = 真无头，**完全不弹窗口**，不占桌面
+        #   hidden/2          = 有头但窗口移到屏幕外（部分站点反爬更严时用）
+        #   0/visible         = 正常显示窗口（仅人工登录/过验证码时用）
+        # 手动登录中的站点强制可见（覆盖全局设置），
+        # 登录完成后自动恢复默认的真无头。
+        vis_mode = os.getenv("BROWSER_HEADLESS", "1").lower()
         if site_name in self.visible_sites:
             vis_mode = "0"
         if vis_mode in ("1", "true", "headless"):
@@ -319,6 +320,20 @@ class BrowserManager:
             args=launch_args,
             ignore_default_args=["--enable-automation"],
         )
+
+        # 真无头时 Chromium 的 HTTP 头仍带 "HeadlessChrome"，
+        # 站点服务端据此判定为自动化 → 统一替换成正常 Chrome UA
+        if headless:
+            try:
+                real_ua = await context.new_page()
+                ua = await real_ua.evaluate("() => navigator.userAgent")
+                await real_ua.close()
+                if "HeadlessChrome" in ua:
+                    ua = ua.replace("HeadlessChrome", "Chrome")
+                    await context.set_extra_http_headers({"User-Agent": ua})
+                    console.print("[dim]🕶️  已伪装 HeadlessChrome UA[/dim]")
+            except Exception:
+                pass
 
         self._contexts[site_name] = context
         console.print(f"[green]✅ {site_name} 浏览器上下文已创建[/green]")

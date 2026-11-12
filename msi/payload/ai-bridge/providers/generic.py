@@ -333,15 +333,16 @@ class GenericProvider:
 
     async def _wait_for_login(self, page, site_name: str, timeout_minutes: int = 10) -> bool:
         """等待用户完成登录，最多等 timeout_minutes 分钟"""
-        # 浏览器隐藏(BROWSER_HEADLESS=hidden/1)时窗口在屏幕外，人工无法登录，
+        # 浏览器不可见（真无头/移出屏幕）时人工无法登录，
         # 干等只会让客户端无限 loading —— 立即快速失败，由调用方 yield 登录错误
         import os as _os
-        if (_os.getenv("BROWSER_HEADLESS") or "").strip().lower() in ("hidden", "1", "true"):
+        vis = (_os.getenv("BROWSER_HEADLESS") or "1").strip().lower()
+        if vis in ("hidden", "1", "true", "headless", "2", "offscreen"):
             console.print(
-                f"[red]🔒 {site_name} 需要登录，但浏览器为隐藏模式 —— 快速失败。"
-                f"修复：设 BROWSER_HEADLESS=0 后请求该站点，在弹出的窗口中登录[/red]"
+                f"[red]🔒 {site_name} 需要登录，但浏览器不可见 —— 快速失败。"
+                f"修复：调用 POST /login/{site_name} 弹出可见窗口登录[/red]"
             )
-            profile_manager.set_login_status(site_name, False, "隐藏模式下无法登录")
+            profile_manager.set_login_status(site_name, False, "浏览器不可见，无法登录")
             return False
         console.print(f"[yellow]━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━[/yellow]")
         console.print(f"[yellow]🔐 {site_name} 需要登录[/yellow]")

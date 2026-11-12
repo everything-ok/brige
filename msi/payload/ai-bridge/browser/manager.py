@@ -13,7 +13,16 @@ console = Console()
 
 
 def fix_playwright_browsers_path() -> str:
-    """修正 PLAYWRIGHT_BROWSERS_PATH（沙箱终端会指向临时目录，导致找不到 Chromium）"""
+    """修正 PLAYWRIGHT_BROWSERS_PATH。
+
+    Cursor / Claude Code 等 IDE 的沙箱终端会把 PLAYWRIGHT_BROWSERS_PATH 指向
+    形如 %TEMP%\\cursor-sandbox-cache\\<hash>\\playwright 的临时目录，那里并没有
+    安装 Chromium，导致启动时报：
+        Executable doesn't exist at ...\\playwright\\chromium-XXXX\\chrome-win64\\chrome.exe
+
+    这里改回系统真实路径（%LOCALAPPDATA%\\ms-playwright），若其中确实存在浏览器。
+    返回最终生效的路径（未设置时返回空串）。
+    """
     current = os.getenv("PLAYWRIGHT_BROWSERS_PATH", "") or ""
     default = Path(os.getenv("LOCALAPPDATA", "")) / "ms-playwright"
 
@@ -22,7 +31,9 @@ def fix_playwright_browsers_path() -> str:
 
     if (sandboxed or missing) and default.is_dir():
         os.environ["PLAYWRIGHT_BROWSERS_PATH"] = str(default)
-        console.print(f"[yellow]⚠️ 沙箱 Playwright 路径，已重定向到: {default}[/yellow]")
+        console.print(
+            f"[yellow]⚠️ 检测到沙箱 Playwright 路径，已重定向到: {default}[/yellow]"
+        )
         return str(default)
 
     return current
@@ -51,6 +62,30 @@ class BrowserManager:
         self._cdp_endpoint = os.getenv(
             "CDP_ENDPOINT", "http://127.0.0.1:9222"
         )
+
+    @staticmethod
+    def _pick_debug_port(preferred: int) -> int:
+        """优先用固定调试端口；被占用时自动找一个空闲端口"""
+        import socket
+
+        def _free(p: int) -> bool:
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind(("127.0.0.1", p))
+                    return True
+                except OSError:
+                    return False
+
+        if _free(preferred):
+            return preferred
+        for p in range(preferred + 1, preferred + 50):
+            if _free(p):
+                console.print(
+                    f"[yellow]⚠️ 调试端口 {preferred} 被占用，改用 {p}[/yellow]"
+                )
+                return p
+        return preferred
 
     async def start(self):
         """启动 Playwright；CDP 模式下连接系统 Chrome"""
@@ -245,11 +280,12 @@ class BrowserManager:
             f"--window-size={1280 + random.randint(-50, 50)},{800 + random.randint(-50, 50)}",
         ]
         # 浏览器可见性（BROWSER_HEADLESS）：
-        #   hidden(默认) = 有头浏览器窗口移到屏幕外，不干扰桌面、且不会被无头指纹识别
-        #   0/visible    = 正常显示窗口（人工登录/过验证码时用）
-        #   1/headless   = 真无头（注意：部分站点反爬会识别并弹验证码）
-        vis_mode = os.getenv("BROWSER_HEADLESS", "hidden").lower()
-        # 手动登录中的站点强制可见（覆盖全局设置）
+        #   1/headless (默认) = 真无头，**完全不弹窗口**，不占桌面
+        #   hidden/2          = 有头但窗口移到屏幕外（部分站点反爬更严时用）
+        #   0/visible         = 正常显示窗口（仅人工登录/过验证码时用）
+        # 手动登录中的站点强制可见（覆盖全局设置），
+        # 登录完成后自动恢复默认的真无头。
+        vis_mode = os.getenv("BROWSER_HEADLESS", "1").lower()
         if site_name in self.visible_sites:
             vis_mode = "0"
         if vis_mode in ("1", "true", "headless"):
@@ -263,8 +299,11 @@ class BrowserManager:
         # 便于人工/脚本用 CDP 检查页面 DOM、排查选择器问题
         dbg_port = os.getenv("BRIDGE_PROFILE_DEBUG_PORT")
         if dbg_port:
-            launch_args.append(f"--remote-debugging-port={dbg_port}")
-            console.print(f"[cyan]🔌 profile 调试端口已开启: {dbg_port}[/cyan]")
+            # 固定端口在多站点并存时会冲突（Chrome 报 bind() 失败，DevTools 起不来），
+            # 这里冲突时自动改用空闲端口，并把实际端口打印出来
+            port = self._pick_debug_port(int(dbg_port))
+            launch_args.append(f"--remote-debugging-port={port}")
+            console.print(f"[cyan]🔌 profile 调试端口已开启: {port}[/cyan]")
 
         context = await self._playwright.chromium.launch_persistent_context(
             user_data_dir=str(profile_path),
@@ -281,6 +320,20 @@ class BrowserManager:
             args=launch_args,
             ignore_default_args=["--enable-automation"],
         )
+
+        # 真无头时 Chromium 的 HTTP 头仍带 "HeadlessChrome"，
+        # 站点服务端据此判定为自动化 → 统一替换成正常 Chrome UA
+        if headless:
+            try:
+                real_ua = await context.new_page()
+                ua = await real_ua.evaluate("() => navigator.userAgent")
+                await real_ua.close()
+                if "HeadlessChrome" in ua:
+                    ua = ua.replace("HeadlessChrome", "Chrome")
+                    await context.set_extra_http_headers({"User-Agent": ua})
+                    console.print("[dim]🕶️  已伪装 HeadlessChrome UA[/dim]")
+            except Exception:
+                pass
 
         self._contexts[site_name] = context
         console.print(f"[green]✅ {site_name} 浏览器上下文已创建[/green]")

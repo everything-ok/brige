@@ -574,13 +574,26 @@ console.log(data.choices[0].message.content);</pre>
       <p style="color:#94a3b8;font-size:.88rem;margin-bottom:12px;line-height:1.6">
         标记 ⚠ <strong style="color:#fbbf24">需登录</strong> 的站点必须先登录才能使用。每个站点只需登录一次，Cookie 会自动保存到本地。
       </p>
-      <h4 style="color:#cbd5e1;font-size:.9rem;margin:8px 0 6px">通过网页界面</h4>
+      <h4 style="color:#cbd5e1;font-size:.9rem;margin:8px 0 6px">① 一键批量登录（推荐）</h4>
+      <p style="color:#94a3b8;font-size:.85rem;margin-bottom:8px">
+        桥接平时以<strong style="color:#86efac">真无头</strong>模式运行，<strong>不会弹出任何浏览器窗口</strong>。
+        点下面的按钮后，会依次弹出可见窗口让你登录失效的站点，登录完自动关闭并恢复无头。
+      </p>
+      <button id="btn-batch-login" class="btn" style="background:#6366f1;color:#fff;border:none;padding:7px 14px;border-radius:6px;cursor:pointer;font-size:.85rem" onclick="startBatchLogin()">
+        🔐 批量登录失效站点
+      </button>
+      <span id="batch-login-status" style="margin-left:10px;font-size:.82rem;color:#94a3b8"></span>
+      <h4 style="color:#cbd5e1;font-size:.9rem;margin:18px 0 6px">② 通过网页界面</h4>
       <p style="color:#94a3b8;font-size:.85rem;margin-bottom:6px">在「已接入站点」表格的「状态」列点击「需登录」链接，跳转到对应网站手动登录即可。</p>
-      <h4 style="color:#cbd5e1;font-size:.9rem;margin:16px 0 6px">通过 API 触发</h4>
-      <pre>POST http://127.0.0.1:{config.PORT}/login/open?url=https://www.doubao.com
-→ 浏览器自动打开 doubao 登录页，完成登录后 Cookie 自动保存</pre>
+      <h4 style="color:#cbd5e1;font-size:.9rem;margin:16px 0 6px">③ 通过 API 触发</h4>
+      <pre>POST http://127.0.0.1:{config.PORT}/login/batch
+→ 后台依次弹出可见窗口，逐个登录（用 /login/batch/status 轮询进度）
+
+POST http://127.0.0.1:{config.PORT}/login/open?url=https://www.doubao.com
+→ 用系统默认浏览器打开 doubao 登录页</pre>
       <h4 style="color:#cbd5e1;font-size:.9rem;margin:16px 0 6px">支持的快捷登录命令</h4>
-      <div class="quick-cmd"><code>POST /login/open?url={{站点URL}}</code><button onclick="copyText('POST /login/open?url=https://www.doubao.com')">复制</button></div>
+      <div class="quick-cmd"><code>POST /login/batch</code><button onclick="copyText('POST /login/batch')">复制</button></div>
+      <div class="quick-cmd"><code>POST /login/open?url=https://www.doubao.com</code><button onclick="copyText('POST /login/open?url=https://www.doubao.com')">复制</button></div>
       <p style="color:#64748b;font-size:.78rem;margin-top:10px;line-height:1.6">
         💡 提示：登录状态保存在本地浏览器上下文中，重启服务不会丢失。如需清除登录状态，删除 <code style="color:#94a3b8">data/profiles/</code> 目录下对应站点文件夹即可。
       </p>
@@ -988,6 +1001,49 @@ async function autoLoginCode(site, btn){{
 // 手动登录：以可见模式打开站点（登录态存入 profile）
 async function openForManualLogin(site){{
   try {{ await fetch('/login/' + site, {{method:'POST'}}); }} catch(e) {{}}
+}}
+
+// ── 一键批量登录 ─────────────────────────────────────────
+let _batchTimer = null;
+async function startBatchLogin(){{
+  const btn = document.getElementById('btn-batch-login');
+  const st = document.getElementById('batch-login-status');
+  btn.disabled = true; btn.textContent = '⏳ 登录中…';
+  try {{
+    const r = await fetch('/login/batch', {{method:'POST'}});
+    const d = await r.json();
+    if (!d.success) {{ st.textContent = d.message || '启动失败'; st.style.color = '#fca5a5'; btn.disabled = false; btn.textContent = '🔐 批量登录失效站点'; return; }}
+    st.style.color = '#93c5fd';
+    st.textContent = '已启动，共 ' + (d.total || 0) + ' 个站点';
+    pollBatchLogin();
+  }} catch(e) {{
+    st.textContent = '❌ ' + e.message; st.style.color = '#fca5a5';
+    btn.disabled = false; btn.textContent = '🔐 批量登录失效站点';
+  }}
+}}
+
+function pollBatchLogin(){{
+  if (_batchTimer) clearInterval(_batchTimer);
+  _batchTimer = setInterval(async function(){{
+    const btn = document.getElementById('btn-batch-login');
+    const st = document.getElementById('batch-login-status');
+    try {{
+      const d = await (await fetch('/login/batch/status')).json();
+      if (d.running) {{
+        st.textContent = '⏳ ' + (d.done || 0) + '/' + (d.total || 0)
+          + ' 已完成，当前：' + (d.current || '-') + '（请在弹出的窗口中登录）';
+        st.style.color = '#93c5fd';
+      }} else {{
+        clearInterval(_batchTimer); _batchTimer = null;
+        const okN = (d.logged_in || []).length, badN = (d.failed || []).length;
+        st.textContent = '✅ 完成：成功 ' + okN + '，失败 ' + badN
+          + (badN ? '（' + (d.failed||[]).join(', ') + '）' : '');
+        st.style.color = okN ? '#86efac' : '#fbbf24';
+        btn.disabled = false; btn.textContent = '🔐 批量登录失效站点';
+        loadSites && loadSites();
+      }}
+    }} catch(e) {{}}
+  }}, 2000);
 }}
 
 // ── 模型市场 ─────────────────────────────────────────────
@@ -1457,15 +1513,110 @@ async def zed_refresh_models():
             "groups": {k: len(v["available_models"]) for k, v in oc.items()}}
 
 
+# ── 批量登录（必须定义在 /login/{site_name} 之前，否则会被路径参数吞掉）──
+_batch_login_state = {
+    "running": False,
+    "total": 0,
+    "done": 0,
+    "current": None,
+    "results": [],
+    "started_at": None,
+    "finished_at": None,
+}
+
+
+@app.post("/login/batch")
+async def login_batch(sites: Optional[str] = None, timeout_minutes: int = 10,
+                      background: bool = True):
+    """批量登录多个站点（依次弹出可见浏览器窗口）。
+
+    sites 省略时，对所有「登录态已明确失效」的站点依次执行 /login/{site} 流程。
+    default background=True —— 后台执行，前端用 /login/batch/status 轮询进度。
+    原因是 20 个站点逐个等人工登录可能耗时数小时，不能阻塞 HTTP 请求。
+    """
+    from browser import profile_manager
+
+    if sites:
+        names = [s.strip() for s in sites.split(",") if s.strip()]
+    else:
+        names = [s.name for s in config.get_enabled_sites()
+                 if profile_manager.get_login_status(s.name) is False]
+
+    if not names:
+        return {"success": True, "results": [], "message": "没有需要登录的站点"}
+
+    if _batch_login_state["running"]:
+        return {"success": False, "message": "已有批量登录任务在运行中",
+                "state": dict(_batch_login_state)}
+
+    names = [n for n in names if config.get_site(n)]
+    _batch_login_state.update({
+        "running": True, "total": len(names), "done": 0, "current": None,
+        "results": [], "started_at": int(time.time()), "finished_at": None,
+    })
+
+    async def _run():
+        try:
+            for name in names:
+                _batch_login_state["current"] = name
+                console.print(f"[cyan]🔐 批量登录: {name}[/cyan]")
+                try:
+                    r = await login_site(name, timeout_minutes=timeout_minutes)
+                    ok, msg = bool(r.get("success")), r.get("message")
+                except Exception as e:
+                    ok, msg = False, str(e)
+                _batch_login_state["results"].append(
+                    {"site": name, "success": ok, "message": msg})
+                _batch_login_state["done"] += 1
+        finally:
+            _batch_login_state["running"] = False
+            _batch_login_state["current"] = None
+            _batch_login_state["finished_at"] = int(time.time())
+
+    if background:
+        asyncio.create_task(_run())
+        return {
+            "success": True,
+            "running": True,
+            "total": len(names),
+            "message": f"批量登录已启动（{len(names)} 个站点），"
+                       f"请依次在弹出的浏览器窗口中完成登录",
+        }
+
+    await _run()
+    results = _batch_login_state["results"]
+    ok = [r["site"] for r in results if r["success"]]
+    failed = [r["site"] for r in results if not r["success"]]
+    return {
+        "success": bool(ok),
+        "results": results,
+        "logged_in": ok,
+        "failed": failed,
+        "message": f"登录成功 {len(ok)}/{len(results)}"
+                   + (f"，失败: {', '.join(failed)}" if failed else ""),
+    }
+
+
+@app.get("/login/batch/status")
+async def login_batch_status():
+    """批量登录进度（供管理页轮询）。"""
+    st = dict(_batch_login_state)
+    results = st.get("results") or []
+    st["logged_in"] = [r["site"] for r in results if r.get("success")]
+    st["failed"] = [r["site"] for r in results if not r.get("success")]
+    if st.get("started_at") and not st.get("finished_at"):
+        st["elapsed_sec"] = int(time.time()) - st["started_at"]
+    return st
+
+
 @app.post("/login/{site_name}")
-async def login_site(site_name: str):
+async def login_site(site_name: str, timeout_minutes: int = 10):
     """
     一键登录指定站点
-    - 如果已有 Profile 且登录有效，直接使用（浏览器保持隐藏，不弹窗）
-    - 如果登录失效/缺失，强制弹出【可见】浏览器让用户登录，完成后自动恢复隐藏
+    - 如果已有 Profile 且登录有效，直接使用（浏览器保持无头，不弹窗）
+    - 如果登录失效/缺失，强制弹出【可见】浏览器让用户登录，完成后自动恢复无头
     """
     from browser import profile_manager, browser_manager
-
     site = config.get_site(site_name)
     if not site:
         raise HTTPException(status_code=404, detail=f"站点 {site_name} 不存在")
@@ -1508,8 +1659,9 @@ async def login_site(site_name: str):
         await page.goto(site.url, timeout=15000)
         await asyncio.sleep(3)
 
-        # 等待用户登录（最多 10 分钟）
-        login_success = await _wait_for_login(page, site_name, timeout_minutes=10)
+        # 等待用户登录（最多 timeout_minutes 分钟）
+        login_success = await _wait_for_login(page, site_name,
+                                              timeout_minutes=timeout_minutes)
 
         if login_success:
             profile_manager.set_login_status(site_name, True, "登录成功")
@@ -1523,49 +1675,6 @@ async def login_site(site_name: str):
         return {"success": False, "site": site_name, "message": str(e)}
     finally:
         browser_manager.visible_sites.discard(site_name)
-
-
-@app.post("/login/batch")
-async def login_batch(sites: Optional[str] = None, timeout_minutes: int = 10):
-    """批量登录多个站点（依次弹出可见浏览器窗口）。
-
-    sites 省略时，对所有「登录态明确失效」的站点依次执行 /login/{site} 流程。
-    每个站点失败不中断整体，最后返回每个站点的结果。
-    """
-    from browser import profile_manager
-
-    if sites:
-        names = [s.strip() for s in sites.split(",") if s.strip()]
-    else:
-        names = [s.name for s in config.get_enabled_sites()
-                 if profile_manager.get_login_status(s.name) is False]
-
-    if not names:
-        return {"success": True, "results": [], "message": "没有需要登录的站点"}
-
-    results = []
-    for name in names:
-        if not config.get_site(name):
-            results.append({"site": name, "success": False, "message": "站点不存在"})
-            continue
-        console.print(f"[cyan]🔐 批量登录: {name}[/cyan]")
-        try:
-            r = await login_site(name)
-            results.append({"site": name, "success": bool(r.get("success")),
-                            "message": r.get("message")})
-        except Exception as e:
-            results.append({"site": name, "success": False, "message": str(e)})
-
-    ok = [r["site"] for r in results if r["success"]]
-    failed = [r["site"] for r in results if not r["success"]]
-    return {
-        "success": bool(ok),
-        "results": results,
-        "logged_in": ok,
-        "failed": failed,
-        "message": f"登录成功 {len(ok)}/{len(results)}"
-                   + (f"，失败: {', '.join(failed)}" if failed else ""),
-    }
 
 
 async def _check_still_logged_in(page, site_name: str) -> bool:
