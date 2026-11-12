@@ -1,5 +1,5 @@
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
-  <Package Name="AI 模型桥接" Manufacturer="everything-ok" Version="1.0.0"
+  <Package Name="AI 模型桥接" Manufacturer="everything-ok" Version="1.1.0"
            UpgradeCode="5C4A7B8E-1234-4D5E-9F6A-7B8C9D0E1F2A" Language="2052"
            Scope="perUser" Codepage="65001">
     <SummaryInformation Description="AI 模型桥接：网页模型 → 本地 API 网关" />
@@ -9,15 +9,291 @@
     <Property Id="ARPPRODUCTICON" Value="bridge.ico" />
     <StandardDirectory Id="LocalAppDataFolder">
       <Directory Id="INSTALLFOLDER" Name="AI 模型桥接">
-        <Directory Id="DirAIB" Name="ai-bridge">
-          <Directory Id="Dir_ai_bridge_behavior" Name="behavior" />
-          <Directory Id="Dir_ai_bridge_browser" Name="browser" />
-          <Directory Id="Dir_ai_bridge_limiter" Name="limiter" />
-          <Directory Id="Dir_ai_bridge_providers" Name="providers" />
-          <Directory Id="Dir_ai_bridge_security" Name="security" />
-          <Directory Id="Dir_ai_bridge_tests" Name="tests" />
+      <Directory Id="Dir245DFF880ED3553D" Name="ai-bridge">
+        <Directory Id="DirE39223D8E2A15091" Name="behavior">
+            <Component Id="cmp74A9A8DB0DBB5D90" Guid="4341f82e-8d65-3b60-83eb-75c9ba13162a" Directory="DirE39223D8E2A15091">
+              <File Id="fil36AA524827B751B7" Source="payload/ai-bridge/behavior/__init__.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp2F660660BFE75FF5" Guid="1160b228-ce38-3399-a9c0-fec1bdf873ef" Directory="DirE39223D8E2A15091">
+              <File Id="fil3C1F8A21F7BF5AB9" Source="payload/ai-bridge/behavior/human.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp0B683EB74E045B1D" Guid="93ae9e62-5804-3fec-866b-c930694ea131" Directory="DirE39223D8E2A15091">
+              <File Id="fil34ACE4FD3BA35539" Source="payload/ai-bridge/behavior/keyboard.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp0B986BE9F6F35351" Guid="4eff7209-7bd3-3b93-b22e-d266fd003ce2" Directory="DirE39223D8E2A15091">
+              <File Id="fil126A0A669828565F" Source="payload/ai-bridge/behavior/mouse.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpEDC16B803CD050DE" Guid="8dbb87d5-e49c-3b62-9e47-6e18521a77ac" Directory="DirE39223D8E2A15091">
+              <File Id="fil4B3B015BF1595786" Source="payload/ai-bridge/behavior/timing.py" KeyPath="yes" />
+            </Component>
         </Directory>
-        <Directory Id="DirGW" Name="free-gateway" />
+        <Directory Id="DirAF8223DD96395EC7" Name="browser">
+            <Component Id="cmpE2980A66986C58F1" Guid="fb826824-b42d-3e3c-87c9-868418cc74b0" Directory="DirAF8223DD96395EC7">
+              <File Id="fil2D14BF8459D6597F" Source="payload/ai-bridge/browser/__init__.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpC4617EC85B825A58" Guid="e65e9431-fe2a-354b-9014-5f816df60f7f" Directory="DirAF8223DD96395EC7">
+              <File Id="fil920E54AB4F205E63" Source="payload/ai-bridge/browser/manager.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpCBE6E6982CD95DDF" Guid="2cb355a1-42db-3153-a7e3-5144c6b1d958" Directory="DirAF8223DD96395EC7">
+              <File Id="filD7CBF15573F35FCD" Source="payload/ai-bridge/browser/profile.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpED424BAD19865917" Guid="c1c70a4a-0b0a-362c-9e1f-c7da6fca19f9" Directory="DirAF8223DD96395EC7">
+              <File Id="fil416789DB1E3E5A02" Source="payload/ai-bridge/browser/stealth.py" KeyPath="yes" />
+            </Component>
+        </Directory>
+        <Directory Id="DirA70B452CD60A5BB3" Name="limiter">
+            <Component Id="cmpCAB467CE0DC65F30" Guid="f248a220-254a-3f8c-b1ab-e2f0329306b4" Directory="DirA70B452CD60A5BB3">
+              <File Id="filC861D3A29E3556C1" Source="payload/ai-bridge/limiter/__init__.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp75F7D5E8395E530A" Guid="ab1d863b-68fb-3f7b-b901-bc0d3b55a661" Directory="DirA70B452CD60A5BB3">
+              <File Id="filACC70A47856D56D7" Source="payload/ai-bridge/limiter/balancer.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpC76E8EE94F3F5D65" Guid="8069de66-bd04-3c65-bc6a-e1104b41db3a" Directory="DirA70B452CD60A5BB3">
+              <File Id="filE9254CBC572F5B1B" Source="payload/ai-bridge/limiter/rate.py" KeyPath="yes" />
+            </Component>
+        </Directory>
+        <Directory Id="Dir0352BAB90EF556B3" Name="providers">
+            <Component Id="cmpF7838E4265F55332" Guid="af97633c-0ffa-3ded-8b11-de6eab429cb9" Directory="Dir0352BAB90EF556B3">
+              <File Id="fil3081C2D7D7915F9A" Source="payload/ai-bridge/providers/__init__.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp055789824AB45305" Guid="1536816a-476f-364c-b378-09ee681c26b0" Directory="Dir0352BAB90EF556B3">
+              <File Id="fil0FEA685A9AC25477" Source="payload/ai-bridge/providers/base.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp93546316D2A35B6E" Guid="41e9f778-8d97-303f-8003-e2f5b1217b87" Directory="Dir0352BAB90EF556B3">
+              <File Id="fil8EEA177958AF5B9B" Source="payload/ai-bridge/providers/generic.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpF3D7B28100E55AB5" Guid="1bdd7504-1e32-314c-9cdf-c6d5a4d2c5e3" Directory="Dir0352BAB90EF556B3">
+              <File Id="filD6E1CD1A63405F13" Source="payload/ai-bridge/providers/model_fetcher.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpAD5380C2453E5628" Guid="e821458a-cfd4-36b2-b466-2b1d522874ef" Directory="Dir0352BAB90EF556B3">
+              <File Id="fil66FC691EFDFB5CF8" Source="payload/ai-bridge/providers/validator.py" KeyPath="yes" />
+            </Component>
+        </Directory>
+        <Directory Id="Dir8EED4CC0AB775BDD" Name="security">
+            <Component Id="cmpCD03EF212CB85C12" Guid="883fc1d2-5cc9-3bac-9472-5d106f27aa26" Directory="Dir8EED4CC0AB775BDD">
+              <File Id="fil53B0675E7830501B" Source="payload/ai-bridge/security/__init__.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpC7335436F77B5004" Guid="c15c46fd-9ee9-3508-96d7-6a15ec536d12" Directory="Dir8EED4CC0AB775BDD">
+              <File Id="fil27F49540362D5D0D" Source="payload/ai-bridge/security/detector.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpEFC0BFF42A7E5393" Guid="3631e8b7-957c-37bf-beea-0f9abfa85e92" Directory="Dir8EED4CC0AB775BDD">
+              <File Id="filA2501F830D5C5532" Source="payload/ai-bridge/security/notifier.py" KeyPath="yes" />
+            </Component>
+        </Directory>
+        <Directory Id="Dir296FA8C7F3685FC6" Name="tests">
+            <Component Id="cmp5165A88995715335" Guid="ce6cd1e6-1f64-317c-a6fa-1071c3cf3bc1" Directory="Dir296FA8C7F3685FC6">
+              <File Id="fil5B0A6E4E096E5E84" Source="payload/ai-bridge/tests/__init__.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp5AFA6B570BE15A29" Guid="46a05441-31b2-3eb2-a88d-95a9409755c1" Directory="Dir296FA8C7F3685FC6">
+              <File Id="fil411BBB27B7025470" Source="payload/ai-bridge/tests/conftest.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpB1664E5504FB5D40" Guid="307a1efc-f346-33f6-af59-11affa253101" Directory="Dir296FA8C7F3685FC6">
+              <File Id="fil76837D88BBE85462" Source="payload/ai-bridge/tests/test_api.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpBD5BA86EF1105139" Guid="dc7c5dcc-93a4-34b4-8123-fe866eb3bc69" Directory="Dir296FA8C7F3685FC6">
+              <File Id="fil792DD796C0405102" Source="payload/ai-bridge/tests/test_behavior.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp1219FF6E91D2563B" Guid="0d1707eb-90a6-3cae-b620-0fbb5f9ac3f9" Directory="Dir296FA8C7F3685FC6">
+              <File Id="fil676734A481865CCF" Source="payload/ai-bridge/tests/test_browser.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp836DE834ECCB55FF" Guid="ddc460ef-a3b0-3a66-afcc-456c65abca81" Directory="Dir296FA8C7F3685FC6">
+              <File Id="fil1879723FCA025B61" Source="payload/ai-bridge/tests/test_config.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp2A9BD77A628553FB" Guid="06fa105c-269a-5b06-bbff-1d32d693d1d3" Directory="Dir296FA8C7F3685FC6">
+              <File Id="fil365A319C80305A2C" Source="payload/ai-bridge/tests/test_profile.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpA3DF71FB24635FEE" Guid="1d796599-9185-3135-8fc7-dbefe2a0cd37" Directory="Dir296FA8C7F3685FC6">
+              <File Id="fil0D83AB6E5D8951C6" Source="payload/ai-bridge/tests/test_provider.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp21BF109308E55D21" Guid="1de68540-8896-3c9b-841f-ad8169d8e7b0" Directory="Dir296FA8C7F3685FC6">
+              <File Id="fil22E1927FF00D5579" Source="payload/ai-bridge/tests/test_rate_limiter.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp2CDF8148F094569A" Guid="8dcc45e6-b183-5c75-a155-49ab8f597808" Directory="Dir296FA8C7F3685FC6">
+              <File Id="fil295FCDE77CF45848" Source="payload/ai-bridge/tests/test_rate_limiter_concurrency.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmpF74DDF2F4EA152B6" Guid="0b12a847-ff49-30bf-b798-4579016a60e3" Directory="Dir296FA8C7F3685FC6">
+              <File Id="fil605846C379BA5563" Source="payload/ai-bridge/tests/test_security.py" KeyPath="yes" />
+            </Component>
+            <Component Id="cmp92123FED133352AD" Guid="9c9e859c-5db2-5244-aace-eb315c7816b2" Directory="Dir296FA8C7F3685FC6">
+              <File Id="fil2EC2ECAD6BC45D38" Source="payload/ai-bridge/tests/test_security_regressions.py" KeyPath="yes" />
+            </Component>
+        </Directory>
+          <Component Id="cmp7BA8EAE4F9C35140" Guid="9f9a8766-7504-3218-8e33-34120018ec50" Directory="Dir245DFF880ED3553D">
+            <File Id="fil92415D1216BF5E35" Source="payload/ai-bridge/.env.example" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp23E71B1CC0DC513C" Guid="2d9758e3-0f37-3f56-848c-cb212dd0239c" Directory="Dir245DFF880ED3553D">
+            <File Id="fil2EB5E1D3ECD55D13" Source="payload/ai-bridge/_cdp_configure.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpBEF48971980C5A59" Guid="ec90f47d-ecb3-38ed-8071-34e17826b68e" Directory="Dir245DFF880ED3553D">
+            <File Id="fil1527CC6778875B83" Source="payload/ai-bridge/_do_ide_config.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp3BB93392534D5881" Guid="f49e1d45-2138-3396-ada9-f05ae8f7a7c7" Directory="Dir245DFF880ED3553D">
+            <File Id="fil4AA08942A6B55A11" Source="payload/ai-bridge/_patch.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpE1A044D2044250A4" Guid="11c087bb-af85-3159-becb-8cdd4eb35f96" Directory="Dir245DFF880ED3553D">
+            <File Id="fil07631E8E79365B67" Source="payload/ai-bridge/_stream_test.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpD72566D119105B21" Guid="1880bb10-c9c0-3358-a4e1-5856c6ba7ef3" Directory="Dir245DFF880ED3553D">
+            <File Id="fil344830F875925F52" Source="payload/ai-bridge/bridge.ico" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp919C2A323A555AFE" Guid="6a0165cb-5cf0-321e-9784-f98b2b97befd" Directory="Dir245DFF880ED3553D">
+            <File Id="fil081D1257343554FE" Source="payload/ai-bridge/bridge_chat.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpC3B18D70F8E25052" Guid="fa809657-0bef-3548-9297-328711d5c8cf" Directory="Dir245DFF880ED3553D">
+            <File Id="filF08DDCED2F885F06" Source="payload/ai-bridge/check_fstring.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpBC8F51AAFC4F55D4" Guid="3a6accbe-4d5e-3002-8ad2-6e834f1104e5" Directory="Dir245DFF880ED3553D">
+            <File Id="fil320076AA162A53DC" Source="payload/ai-bridge/check_zai_login.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp30A4D746DB795854" Guid="3b44b0ab-913e-348a-94ee-e1105832cf11" Directory="Dir245DFF880ED3553D">
+            <File Id="filC9BE1C47E7F058B9" Source="payload/ai-bridge/config.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp2BFFAF1B77935542" Guid="762d8c56-8bab-533c-b80a-9b7b4de444ce" Directory="Dir245DFF880ED3553D">
+            <File Id="filFB52F561CE615B28" Source="payload/ai-bridge/continue_config.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpC50E80206D7453C0" Guid="0c01e61a-7dd0-39c5-86dd-2cffac5ec82c" Directory="Dir245DFF880ED3553D">
+            <File Id="filCA9FA4D9B79D54B3" Source="payload/ai-bridge/ide_config.bat" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp23A700D996515356" Guid="cff9d9ab-be72-355e-adb4-64af65d7d3d0" Directory="Dir245DFF880ED3553D">
+            <File Id="fil28A7DAE0D8405C72" Source="payload/ai-bridge/ide_config.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpE79FC4FD3AD45063" Guid="ee98f4d3-dd19-3ef0-8e59-70d84b4e1659" Directory="Dir245DFF880ED3553D">
+            <File Id="filE673CEA2A68B55C3" Source="payload/ai-bridge/ide_config_gui.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp1CE56A7EF8C95B38" Guid="1ccae614-0097-3a82-818e-42fab802cd0c" Directory="Dir245DFF880ED3553D">
+            <File Id="filFD5FDACF059A56A2" Source="payload/ai-bridge/main.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpFBA2F4A0976F5D2E" Guid="1834e74b-fba1-5884-bd09-10b2991ae501" Directory="Dir245DFF880ED3553D">
+            <File Id="fil0382BA594A555577" Source="payload/ai-bridge/model_catalog.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpA04658E1C4A35F0C" Guid="d9790ff2-e72b-394a-9474-7bac9e885a75" Directory="Dir245DFF880ED3553D">
+            <File Id="filA9B5A09550AC5439" Source="payload/ai-bridge/probe_deepseek.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpA1E99BA853B25EE8" Guid="818b73de-29c8-3275-8db0-2807714b4da7" Directory="Dir245DFF880ED3553D">
+            <File Id="filBDFED0B8B786596C" Source="payload/ai-bridge/probe_free_sites.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp4D9CE92121955AA1" Guid="ab53002f-f202-3a5e-81f0-a67174280669" Directory="Dir245DFF880ED3553D">
+            <File Id="fil699563DA1A0A5E4F" Source="payload/ai-bridge/probe_groq.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpCCAE5111541551EC" Guid="c0f8e80e-c289-38cf-a936-60caecb8790e" Directory="Dir245DFF880ED3553D">
+            <File Id="fil93D8668D78BA57DB" Source="payload/ai-bridge/probe_logged_in.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp5C5ED9EF82815970" Guid="ea691d1c-04ad-37fb-b464-f31ab69cec4b" Directory="Dir245DFF880ED3553D">
+            <File Id="fil1298AC7085AE523E" Source="payload/ai-bridge/probe_logged_in_sites.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp4ED905077706584F" Guid="fc36e564-b5ed-319e-a81f-e42c5ab225ae" Directory="Dir245DFF880ED3553D">
+            <File Id="fil2BC03D7DB12B5EE6" Source="payload/ai-bridge/probe_zai.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp8DCFCFBBFE815232" Guid="f22ad8c9-f4db-3d69-b9f3-cb563457fc3d" Directory="Dir245DFF880ED3553D">
+            <File Id="filF610F11880BF5342" Source="payload/ai-bridge/probe_zai_models.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp60B6657EEDBB5980" Guid="46e87c13-4664-3957-bcee-bdb7066cb1d5" Directory="Dir245DFF880ED3553D">
+            <File Id="fil6A3F6BE86F7C5644" Source="payload/ai-bridge/pytest.ini" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp37D462114E625E04" Guid="0d0d30e5-e11d-3fd2-aeda-881c4adca5c2" Directory="Dir245DFF880ED3553D">
+            <File Id="fil752BBB48723C544E" Source="payload/ai-bridge/requirements.txt" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp35E912435E425BC2" Guid="5434a93a-b58a-3dda-b378-c71d6a11ed86" Directory="Dir245DFF880ED3553D">
+            <File Id="fil872B0D8A363A5DD7" Source="payload/ai-bridge/sites.yaml" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp259265DC1D225841" Guid="db9c0e13-3619-3a88-b385-f3ad0d529c12" Directory="Dir245DFF880ED3553D">
+            <File Id="fil2C1FC9DE12DA5B5A" Source="payload/ai-bridge/start_chrome_cdp.bat" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpCBCAC58D607955A5" Guid="a4ef1942-d102-3460-9910-fd22d3e1914e" Directory="Dir245DFF880ED3553D">
+            <File Id="filDD2A942429785688" Source="payload/ai-bridge/start_debug.bat" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp0F12B7D8A2A45445" Guid="6a3938d5-0cc6-3839-a609-3889216d2103" Directory="Dir245DFF880ED3553D">
+            <File Id="fil73230AE40A87502D" Source="payload/ai-bridge/start_hidden.bat" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpE5542393DCF75D65" Guid="67d463a6-4d11-3551-bc15-2ad2b5be2203" Directory="Dir245DFF880ED3553D">
+            <File Id="filB07EF31E59875F02" Source="payload/ai-bridge/start_hidden.vbs" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp199FF6FF6B995A88" Guid="21e5491c-f1b6-3318-8361-0572090815fe" Directory="Dir245DFF880ED3553D">
+            <File Id="fil6C9F74CFEBDB5E32" Source="payload/ai-bridge/test_bridge_api.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpD9540BFFB774596B" Guid="0afaf2ae-44dd-3bd6-b452-25dadb988fd9" Directory="Dir245DFF880ED3553D">
+            <File Id="filFEDFB6CC6C9C5428" Source="payload/ai-bridge/test_def.json" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp047E15EA75015EA9" Guid="66a6ced3-c957-3674-9e9e-b7edc4a4892f" Directory="Dir245DFF880ED3553D">
+            <File Id="fil0629A374C8415FBE" Source="payload/ai-bridge/test_glm_bridge.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpF11A8C2726365DC8" Guid="c30a2f3b-a0f4-3b1b-9c1c-7e9be469981b" Directory="Dir245DFF880ED3553D">
+            <File Id="fil2DEC17E205865CEA" Source="payload/ai-bridge/test_quick.json" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp11A7931EBCE65912" Guid="f9c20a44-4b30-5f18-b419-b21f397ffb17" Directory="Dir245DFF880ED3553D">
+            <File Id="fil6CA97D24A33E56ED" Source="payload/ai-bridge/tool_emulation.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp438F2EF8A4825E1F" Guid="8c4585f6-c982-5043-b9f1-3026000f3470" Directory="Dir245DFF880ED3553D">
+            <File Id="fil358C9942CD1856C8" Source="payload/ai-bridge/verify_continue_models.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpAA3EDEB8067652E1" Guid="040afcc6-4cf0-37cd-993a-3b2b906aaeb3" Directory="Dir245DFF880ED3553D">
+            <File Id="fil8FDD09A7966C5DCB" Source="payload/ai-bridge/verify_hello.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp4B48291A7628598B" Guid="bcfaed1a-d412-588b-aa2a-5c3bb882a6b9" Directory="Dir245DFF880ED3553D">
+            <File Id="fil452912AB81E55AFE" Source="payload/ai-bridge/verify_tool_calls.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp034E2A2A7FE95DBC" Guid="802c6714-f333-3ffb-9457-9c296e6e997e" Directory="Dir245DFF880ED3553D">
+            <File Id="filAD22B6FEEFBA5E56" Source="payload/ai-bridge/zai" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpADAE06897DB151CE" Guid="6ef8841a-a1c9-3f0f-af9a-ec028b94e4c1" Directory="Dir245DFF880ED3553D">
+            <File Id="fil74B58FFD82995FF0" Source="payload/ai-bridge/启动Chrome调试.bat" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp095EDCAF2A375A18" Guid="2638a602-c6b0-3514-b099-e7b408dcb224" Directory="Dir245DFF880ED3553D">
+            <File Id="fil6E2FD2F5E539545A" Source="payload/ai-bridge/启动VSCode桥接.bat" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp3FCFAC269B925F9E" Guid="de918cf4-f1fa-314f-ba38-672f80e11a6b" Directory="Dir245DFF880ED3553D">
+            <File Id="filEC09D65F6B915715" Source="payload/ai-bridge/启动桥接服务.bat" KeyPath="yes" />
+          </Component>
+      </Directory>
+      <Directory Id="Dir54135D69191850A2" Name="free-gateway">
+        <Directory Id="DirD9B55D07F2105C71" Name="tests">
+            <Component Id="cmp0F79B7DD7FC65BBC" Guid="82ee6027-33a7-5e68-b5d7-df0e96c0617c" Directory="DirD9B55D07F2105C71">
+              <File Id="filD059C0EB21C85993" Source="payload/free-gateway/tests/test_gateway.py" KeyPath="yes" />
+            </Component>
+        </Directory>
+          <Component Id="cmpA458EC74764B59D3" Guid="ee1d48eb-fc2a-5c31-9589-78380d963e32" Directory="Dir54135D69191850A2">
+            <File Id="fil39E30AC467F454D3" Source="payload/free-gateway/bridge.ico" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp540B60AA24905200" Guid="9b72f8cc-ee5d-3063-8dc3-306ed897e527" Directory="Dir54135D69191850A2">
+            <File Id="fil0E6DC3F09CF553A1" Source="payload/free-gateway/gateway.py" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp2A5A07DCF70D5D77" Guid="53cb9617-842d-36f0-8a48-775b5be67531" Directory="Dir54135D69191850A2">
+            <File Id="filF5E6F773ABC356AB" Source="payload/free-gateway/local_models.json" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp9238079AF65F56A5" Guid="b157d5d1-8f0c-34e0-b432-e29bbf44eca5" Directory="Dir54135D69191850A2">
+            <File Id="filF7B0B91D85045617" Source="payload/free-gateway/openrouter.ico" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp5FEEECBEC465555D" Guid="a161edd7-2d38-3bf9-beac-20722aff173e" Directory="Dir54135D69191850A2">
+            <File Id="fil90A3E3CBC3625CDE" Source="payload/free-gateway/start_debug.bat" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp62819BE0C7315274" Guid="6aaec5b3-2165-312f-b8cc-19620eff861e" Directory="Dir54135D69191850A2">
+            <File Id="fil7736FBB9E5915A17" Source="payload/free-gateway/start_hidden.bat" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp1E22959649185373" Guid="30f60204-0a87-3d02-aac2-d734e1d4d09c" Directory="Dir54135D69191850A2">
+            <File Id="fil7CFCA05E4EFD59AA" Source="payload/free-gateway/start_hidden.vbs" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp1B4D4EE1EA765808" Guid="9af4a7b2-1496-3bdd-ac52-ffd2870e28f4" Directory="Dir54135D69191850A2">
+            <File Id="filCF8C235D378F5ACA" Source="payload/free-gateway/启动免费网关.bat" KeyPath="yes" />
+          </Component>
+          <Component Id="cmpDA782721C2DD5026" Guid="1335e996-fde8-3ef1-8ca4-e185f17f336e" Directory="Dir54135D69191850A2">
+            <File Id="fil44B3B69C61EB595D" Source="payload/free-gateway/启动服务.vbs" KeyPath="yes" />
+          </Component>
+          <Component Id="cmp9CFBB9F576055D28" Guid="51edc5ae-8714-3e9a-8f6d-c02d2f94b05c" Directory="Dir54135D69191850A2">
+            <File Id="fil7AF111B9DEE854E2" Source="payload/free-gateway/启动模型服务.bat" KeyPath="yes" />
+          </Component>
+      </Directory>
+        <Component Id="cmpD8A12AE4349D51CD" Guid="9fc929c3-7b9e-3d47-afcf-9d5f721d5d7a" Directory="INSTALLFOLDER">
+          <File Id="fil44BE15E978845A1B" Source="payload/AI模型桥接.exe" KeyPath="yes" />
+        </Component>
+        <Component Id="cmpD6DC3D061CAE569E" Guid="58e1f9e4-7c36-3d52-8195-4c7a97e0b59c" Directory="INSTALLFOLDER">
+          <File Id="fil3B69DCF9D9C65964" Source="payload/README.txt" KeyPath="yes" />
+        </Component>
+        <Component Id="cmpA15BF36FD59B54EA" Guid="e57a62d8-31c7-33a6-a716-a96d47f9b2b7" Directory="INSTALLFOLDER">
+          <File Id="fil32F86C6608EA5F85" Source="payload/requirements-bridge.txt" KeyPath="yes" />
+        </Component>
+        <Component Id="cmp455E76BEBCE05903" Guid="1577cb30-b117-3147-bba3-a35d04db8177" Directory="INSTALLFOLDER">
+          <File Id="fil7BBBFB2C9CF35531" Source="payload/setup_runtime.bat" KeyPath="yes" />
+        </Component>
       </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder">
@@ -32,270 +308,104 @@
     </StandardDirectory>
     <StandardDirectory Id="DesktopFolder">
       <Component Id="DesktopShortcut" Guid="A1B2C3D4-1111-4A2B-8C3D-5E6F7A8B9C0D">
-          <Shortcut Id="DesktopExeShortcut" Name="AI 模型桥接" Description="启动 AI 模型桥接服务并打开管理页"
-                    Target="[INSTALLFOLDER]AI模型桥接.exe" WorkingDirectory="INSTALLFOLDER"
-                    Icon="bridge.ico" />
-          <RegistryValue Root="HKCU" Key="Software/AI模型桥接" Name="desktop_shortcut" Value="1" Type="integer" KeyPath="yes" />
+        <Shortcut Id="DesktopExeShortcut" Name="AI 模型桥接" Description="启动 AI 模型桥接服务并打开管理页"
+                Target="[INSTALLFOLDER]AI模型桥接.exe" WorkingDirectory="INSTALLFOLDER"
+                Icon="bridge.ico" />
+        <RegistryValue Root="HKCU" Key="Software/AI模型桥接" Name="desktop_shortcut" Value="1" Type="integer" KeyPath="yes" />
       </Component>
     </StandardDirectory>
     <Feature Id="Main" Level="1" Title="AI 模型桥接核心文件">
       <ComponentRef Id="MenuShortcut" />
       <ComponentRef Id="DesktopShortcut" />
-      <Component Id="cmpD2B2DB606CDC281829AE" Guid="9f9a8766-7504-3218-8e33-34120018ec50" Directory="DirAIB">
-        <File Id="fil8B6C2A81DB8D130D831C" Source="payload/ai-bridge/.env.example" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpAFFE9B5BE2360CFB047B" Guid="2d9758e3-0f37-3f56-848c-cb212dd0239c" Directory="DirAIB">
-        <File Id="filFBEE043A2F520667A6B6" Source="payload/ai-bridge/_cdp_configure.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp67AD9A92AE859311C8DD" Guid="ec90f47d-ecb3-38ed-8071-34e17826b68e" Directory="DirAIB">
-        <File Id="filFB80E16A348EAD64D99E" Source="payload/ai-bridge/_do_ide_config.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp63D83B705C44778A284E" Guid="d7ae0d64-a51b-31e4-8983-c3200d5d847d" Directory="DirAIB">
-        <File Id="filC90087DAA8296EC14539" Source="payload/ai-bridge/_gen.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp8E881F35DCFF76E77D94" Guid="e145b418-438f-3d2e-b434-3cc8b7297cc3" Directory="DirAIB">
-        <File Id="filF28698E92A97655C2A20" Source="payload/ai-bridge/_gen2.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpBAFB5FCC77B951A7A4CF" Guid="805a7b54-9f12-36bf-8ed7-d0a50b988c44" Directory="DirAIB">
-        <File Id="filD10DB76B234B0E75D302" Source="payload/ai-bridge/_gen3.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpBB9A40BB3424237F7B43" Guid="e21e00cd-1c56-3ef1-92f1-8e0b41379ee6" Directory="DirAIB">
-        <File Id="fil4363755D4B97C4276E79" Source="payload/ai-bridge/_gen4.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp26AFCEE4D06202DD0EA3" Guid="a55d4e0d-02db-3e66-aa6f-17c5293165f9" Directory="DirAIB">
-        <File Id="fil5212B0B73E39274515E8" Source="payload/ai-bridge/_gen5.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpDF3E715AA7171D566776" Guid="f49e1d45-2138-3396-ada9-f05ae8f7a7c7" Directory="DirAIB">
-        <File Id="filABC96A9A7F14E9AB610F" Source="payload/ai-bridge/_patch.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp144E1A574A5797B22E38" Guid="11c087bb-af85-3159-becb-8cdd4eb35f96" Directory="DirAIB">
-        <File Id="fil04A3F540ACC27C651B4F" Source="payload/ai-bridge/_stream_test.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpD0C0679D3C420D63AE51" Guid="37e50086-7206-34b5-ad02-e5728b322e26" Directory="DirAIB">
-        <File Id="fil0EBB2BD42FAB0594ECF2" Source="payload/ai-bridge/_write.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpBAFD8A6E8ACEDFD9C7D9" Guid="1880bb10-c9c0-3358-a4e1-5856c6ba7ef3" Directory="DirAIB">
-        <File Id="fil784BD313409EEF55A8A8" Source="payload/ai-bridge/bridge.ico" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp200BD3175736AEE4B46F" Guid="6a0165cb-5cf0-321e-9784-f98b2b97befd" Directory="DirAIB">
-        <File Id="filF7A5674C1346F8207C26" Source="payload/ai-bridge/bridge_chat.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp5F265AA99164BD1E66BC" Guid="fa809657-0bef-3548-9297-328711d5c8cf" Directory="DirAIB">
-        <File Id="filCC1C88204603DE4CA145" Source="payload/ai-bridge/check_fstring.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpBFD74FEDF9DA1D3BA7D6" Guid="3a6accbe-4d5e-3002-8ad2-6e834f1104e5" Directory="DirAIB">
-        <File Id="fil1407FB34B7ABC8D53C23" Source="payload/ai-bridge/check_zai_login.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpE60BB4ACD30CD1834E11" Guid="3b44b0ab-913e-348a-94ee-e1105832cf11" Directory="DirAIB">
-        <File Id="filB39CD84F48D1B4C4B746" Source="payload/ai-bridge/config.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp9E4FC79EDFA139A148EE" Guid="0c01e61a-7dd0-39c5-86dd-2cffac5ec82c" Directory="DirAIB">
-        <File Id="filBC687B845AF14528F8FD" Source="payload/ai-bridge/ide_config.bat" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp512559D3FEED43C7A17B" Guid="cff9d9ab-be72-355e-adb4-64af65d7d3d0" Directory="DirAIB">
-        <File Id="filE6BC1B30FAA2EC20DD41" Source="payload/ai-bridge/ide_config.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpA1BEB117BB6E296B9030" Guid="ee98f4d3-dd19-3ef0-8e59-70d84b4e1659" Directory="DirAIB">
-        <File Id="fil93001C31016C852EF6AD" Source="payload/ai-bridge/ide_config_gui.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpB8C0354784F178589866" Guid="1ccae614-0097-3a82-818e-42fab802cd0c" Directory="DirAIB">
-        <File Id="filF7770221CEF9317846EC" Source="payload/ai-bridge/main.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpA34BE7545E1EA0DE3809" Guid="d9790ff2-e72b-394a-9474-7bac9e885a75" Directory="DirAIB">
-        <File Id="fil5DA7EC95820A1E44CB86" Source="payload/ai-bridge/probe_deepseek.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp8251247A519C39AB0972" Guid="818b73de-29c8-3275-8db0-2807714b4da7" Directory="DirAIB">
-        <File Id="fil6717F9B5A71EDE945172" Source="payload/ai-bridge/probe_free_sites.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp7A10D0C636FA270AA8CC" Guid="ab53002f-f202-3a5e-81f0-a67174280669" Directory="DirAIB">
-        <File Id="fil9265FFAB1FFE67C3649A" Source="payload/ai-bridge/probe_groq.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp2C6B15704198727A8EE1" Guid="c0f8e80e-c289-38cf-a936-60caecb8790e" Directory="DirAIB">
-        <File Id="fil9CBFEB723B5507AE9ABA" Source="payload/ai-bridge/probe_logged_in.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpEEFFD90CB0D812DADC02" Guid="ea691d1c-04ad-37fb-b464-f31ab69cec4b" Directory="DirAIB">
-        <File Id="filF2074B2F07D392AFDAB0" Source="payload/ai-bridge/probe_logged_in_sites.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp3EA75F7EAA10A37F28E9" Guid="fc36e564-b5ed-319e-a81f-e42c5ab225ae" Directory="DirAIB">
-        <File Id="fil3FC25C0FBB3D30F041D3" Source="payload/ai-bridge/probe_zai.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpB81B7AC5B473ED42DA96" Guid="f22ad8c9-f4db-3d69-b9f3-cb563457fc3d" Directory="DirAIB">
-        <File Id="fil2EFB491A9BC7D76FEA10" Source="payload/ai-bridge/probe_zai_models.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpC9600B52446186D21389" Guid="46e87c13-4664-3957-bcee-bdb7066cb1d5" Directory="DirAIB">
-        <File Id="fil93BBDFF0B00DBE5162F2" Source="payload/ai-bridge/pytest.ini" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp3595F21354AC38FE6524" Guid="0d0d30e5-e11d-3fd2-aeda-881c4adca5c2" Directory="DirAIB">
-        <File Id="fil14F39DDC4C864F74C756" Source="payload/ai-bridge/requirements.txt" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp0F13FED3EB59A52B57BC" Guid="5434a93a-b58a-3dda-b378-c71d6a11ed86" Directory="DirAIB">
-        <File Id="filF2F850F603A8EA12EC8F" Source="payload/ai-bridge/sites.yaml" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp0A322F15ADC5F0560096" Guid="db9c0e13-3619-3a88-b385-f3ad0d529c12" Directory="DirAIB">
-        <File Id="fil805A436131FC66F09C4B" Source="payload/ai-bridge/start_chrome_cdp.bat" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp4258DD4C777D1E4029AE" Guid="a4ef1942-d102-3460-9910-fd22d3e1914e" Directory="DirAIB">
-        <File Id="fil6F8F420B84A0B7643397" Source="payload/ai-bridge/start_debug.bat" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpBA5647DF248DB19504D8" Guid="6a3938d5-0cc6-3839-a609-3889216d2103" Directory="DirAIB">
-        <File Id="fil7E8F2CF1BEA2B347255E" Source="payload/ai-bridge/start_hidden.bat" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp2E5CABA7E4714448612A" Guid="67d463a6-4d11-3551-bc15-2ad2b5be2203" Directory="DirAIB">
-        <File Id="fil4A4E1CB7837CC8A2D961" Source="payload/ai-bridge/start_hidden.vbs" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp5EE0FF69316B5EDF036E" Guid="21e5491c-f1b6-3318-8361-0572090815fe" Directory="DirAIB">
-        <File Id="filBCFF9CEC03B92018ADFD" Source="payload/ai-bridge/test_bridge_api.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpD2A8E3E75096812B13B6" Guid="0afaf2ae-44dd-3bd6-b452-25dadb988fd9" Directory="DirAIB">
-        <File Id="fil965E647FB7082116452F" Source="payload/ai-bridge/test_def.json" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp1197EADB4CA2E0A2C412" Guid="66a6ced3-c957-3674-9e9e-b7edc4a4892f" Directory="DirAIB">
-        <File Id="fil3759BBF0B72361401046" Source="payload/ai-bridge/test_glm_bridge.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpF408F7A3006488FCEC6C" Guid="c30a2f3b-a0f4-3b1b-9c1c-7e9be469981b" Directory="DirAIB">
-        <File Id="filF15AFCB5928DAF7636E8" Source="payload/ai-bridge/test_quick.json" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp4D86F8B207D5FEE6D726" Guid="040afcc6-4cf0-37cd-993a-3b2b906aaeb3" Directory="DirAIB">
-        <File Id="fil6AEBA88337B4ACD1671A" Source="payload/ai-bridge/verify_hello.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp92860EB389C5DB68ADBB" Guid="802c6714-f333-3ffb-9457-9c296e6e997e" Directory="DirAIB">
-        <File Id="filB87FF2CBE4907F3E34CF" Source="payload/ai-bridge/zai" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp7895EC57C6CA5A494E1C" Guid="6ef8841a-a1c9-3f0f-af9a-ec028b94e4c1" Directory="DirAIB">
-        <File Id="fil86BA0F70E219E203997E" Source="payload/ai-bridge/启动Chrome调试.bat" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp5BC0BA567A32A6F8E289" Guid="2638a602-c6b0-3514-b099-e7b408dcb224" Directory="DirAIB">
-        <File Id="fil573459D901794564ACF3" Source="payload/ai-bridge/启动VSCode桥接.bat" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp89DA407ECE7DD15D9475" Guid="de918cf4-f1fa-314f-ba38-672f80e11a6b" Directory="DirAIB">
-        <File Id="fil1F9DA5C519B48857F05B" Source="payload/ai-bridge/启动桥接服务.bat" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp0AA17850511D0B3EB931" Guid="4341f82e-8d65-3b60-83eb-75c9ba13162a" Directory="Dir_ai_bridge_behavior">
-        <File Id="filD5490760B525D86BD3BF" Source="payload/ai-bridge/behavior/__init__.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp72415B33ABCDA8BD8766" Guid="1160b228-ce38-3399-a9c0-fec1bdf873ef" Directory="Dir_ai_bridge_behavior">
-        <File Id="fil4625B4B6D0CD5AE56E89" Source="payload/ai-bridge/behavior/human.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp73FA75789F743DC92020" Guid="93ae9e62-5804-3fec-866b-c930694ea131" Directory="Dir_ai_bridge_behavior">
-        <File Id="filC1C54D2D59EBCF7AC5B0" Source="payload/ai-bridge/behavior/keyboard.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpBFEE0D04A53D32D194F8" Guid="4eff7209-7bd3-3b93-b22e-d266fd003ce2" Directory="Dir_ai_bridge_behavior">
-        <File Id="fil56C5237E915EB4E26389" Source="payload/ai-bridge/behavior/mouse.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpA277EB70C8BB7B715BD3" Guid="8dbb87d5-e49c-3b62-9e47-6e18521a77ac" Directory="Dir_ai_bridge_behavior">
-        <File Id="filB83F6946D786B492462E" Source="payload/ai-bridge/behavior/timing.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpEA06A40FA57E96A87876" Guid="fb826824-b42d-3e3c-87c9-868418cc74b0" Directory="Dir_ai_bridge_browser">
-        <File Id="fil0AEDE3E5017365E8453E" Source="payload/ai-bridge/browser/__init__.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp94ACC4BB1375DA40B346" Guid="e65e9431-fe2a-354b-9014-5f816df60f7f" Directory="Dir_ai_bridge_browser">
-        <File Id="filF9E7F86C16B760E73EFF" Source="payload/ai-bridge/browser/manager.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpD472F540C0D76D9E5A7F" Guid="2cb355a1-42db-3153-a7e3-5144c6b1d958" Directory="Dir_ai_bridge_browser">
-        <File Id="filBC00623BD9029FFD1648" Source="payload/ai-bridge/browser/profile.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpE54077745CB33676020A" Guid="c1c70a4a-0b0a-362c-9e1f-c7da6fca19f9" Directory="Dir_ai_bridge_browser">
-        <File Id="fil628EA7616A6A5C236571" Source="payload/ai-bridge/browser/stealth.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp04525C9FA0DDFCE86D98" Guid="f248a220-254a-3f8c-b1ab-e2f0329306b4" Directory="Dir_ai_bridge_limiter">
-        <File Id="fil206F04D395A116B5D51D" Source="payload/ai-bridge/limiter/__init__.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp65078BC4180EF84AC189" Guid="ab1d863b-68fb-3f7b-b901-bc0d3b55a661" Directory="Dir_ai_bridge_limiter">
-        <File Id="fil5BE13E4F0BC926B1E51F" Source="payload/ai-bridge/limiter/balancer.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpC350439EDEC0C9C438BB" Guid="8069de66-bd04-3c65-bc6a-e1104b41db3a" Directory="Dir_ai_bridge_limiter">
-        <File Id="fil47AEEDF043E2C2762026" Source="payload/ai-bridge/limiter/rate.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp52F166C8A2413B7FF907" Guid="af97633c-0ffa-3ded-8b11-de6eab429cb9" Directory="Dir_ai_bridge_providers">
-        <File Id="fil6B500E3786838595AE75" Source="payload/ai-bridge/providers/__init__.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp030CCA895A83C379F8D7" Guid="1536816a-476f-364c-b378-09ee681c26b0" Directory="Dir_ai_bridge_providers">
-        <File Id="fil8CABA38CA331B79E0BC3" Source="payload/ai-bridge/providers/base.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp16138A89E642417BBDBE" Guid="41e9f778-8d97-303f-8003-e2f5b1217b87" Directory="Dir_ai_bridge_providers">
-        <File Id="fil510472A828A97D661377" Source="payload/ai-bridge/providers/generic.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpCB759511FAC23122151A" Guid="1bdd7504-1e32-314c-9cdf-c6d5a4d2c5e3" Directory="Dir_ai_bridge_providers">
-        <File Id="fil0F7194496A8FF7F88A49" Source="payload/ai-bridge/providers/model_fetcher.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp1D4591FE1F1DAA28A04A" Guid="e821458a-cfd4-36b2-b466-2b1d522874ef" Directory="Dir_ai_bridge_providers">
-        <File Id="fil52630080C0925C8180DE" Source="payload/ai-bridge/providers/validator.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp89F6A8F1330F401FA546" Guid="883fc1d2-5cc9-3bac-9472-5d106f27aa26" Directory="Dir_ai_bridge_security">
-        <File Id="fil6EDA294B77E7B8FB7850" Source="payload/ai-bridge/security/__init__.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp612CDE288E95FD023D06" Guid="c15c46fd-9ee9-3508-96d7-6a15ec536d12" Directory="Dir_ai_bridge_security">
-        <File Id="fil196D3E5081D296933910" Source="payload/ai-bridge/security/detector.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp0E099F6DB338876B33A9" Guid="3631e8b7-957c-37bf-beea-0f9abfa85e92" Directory="Dir_ai_bridge_security">
-        <File Id="filA0BE6A140714E12940D4" Source="payload/ai-bridge/security/notifier.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpCC62626E1C309D6D88BF" Guid="ce6cd1e6-1f64-317c-a6fa-1071c3cf3bc1" Directory="Dir_ai_bridge_tests">
-        <File Id="fil57F5669B72F184F18FF6" Source="payload/ai-bridge/tests/__init__.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp600C567CEEAF6860CC46" Guid="46a05441-31b2-3eb2-a88d-95a9409755c1" Directory="Dir_ai_bridge_tests">
-        <File Id="fil606CA4A4EF0B304D4CBF" Source="payload/ai-bridge/tests/conftest.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpEA0C635767775DBAF52B" Guid="307a1efc-f346-33f6-af59-11affa253101" Directory="Dir_ai_bridge_tests">
-        <File Id="fil9CAB5466159B5A958465" Source="payload/ai-bridge/tests/test_api.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp0D7ACDCC08F6C91B66C6" Guid="dc7c5dcc-93a4-34b4-8123-fe866eb3bc69" Directory="Dir_ai_bridge_tests">
-        <File Id="fil9EE2E4345E92789E7117" Source="payload/ai-bridge/tests/test_behavior.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp580A41967589F40633C3" Guid="0d1707eb-90a6-3cae-b620-0fbb5f9ac3f9" Directory="Dir_ai_bridge_tests">
-        <File Id="fil86D16FC69C8501FEE005" Source="payload/ai-bridge/tests/test_browser.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp95751F29C0FF13DA180F" Guid="ddc460ef-a3b0-3a66-afcc-456c65abca81" Directory="Dir_ai_bridge_tests">
-        <File Id="fil2E63CDC6C2D8AB49CDDD" Source="payload/ai-bridge/tests/test_config.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpF4BBA964AC419AACC95D" Guid="1d796599-9185-3135-8fc7-dbefe2a0cd37" Directory="Dir_ai_bridge_tests">
-        <File Id="filFD003D4E8F5CD2E1C6B0" Source="payload/ai-bridge/tests/test_provider.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpE521AD87FAEB413C75E5" Guid="1de68540-8896-3c9b-841f-ad8169d8e7b0" Directory="Dir_ai_bridge_tests">
-        <File Id="fil858E2D7698E46685E27D" Source="payload/ai-bridge/tests/test_rate_limiter.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp3448EB2E931149CFBDE2" Guid="0b12a847-ff49-30bf-b798-4579016a60e3" Directory="Dir_ai_bridge_tests">
-        <File Id="fil6428A570050DA673BF3B" Source="payload/ai-bridge/tests/test_security.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp3BD9038A2401708AAF8F" Guid="9b72f8cc-ee5d-3063-8dc3-306ed897e527" Directory="DirGW">
-        <File Id="filEFFC50C72B1E2AE82FEF" Source="payload/free-gateway/gateway.py" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp84431C56C851568633CB" Guid="53cb9617-842d-36f0-8a48-775b5be67531" Directory="DirGW">
-        <File Id="fil007D25CB8A8B5383A3C9" Source="payload/free-gateway/local_models.json" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpACCA935A96072B772B61" Guid="b157d5d1-8f0c-34e0-b432-e29bbf44eca5" Directory="DirGW">
-        <File Id="fil0788CFD4E5222E0D2E83" Source="payload/free-gateway/openrouter.ico" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpEE632986723CE03E80AC" Guid="a161edd7-2d38-3bf9-beac-20722aff173e" Directory="DirGW">
-        <File Id="fil7205076EE0E001A10D99" Source="payload/free-gateway/start_debug.bat" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpFFD490604A5C322AFEB6" Guid="6aaec5b3-2165-312f-b8cc-19620eff861e" Directory="DirGW">
-        <File Id="filF1A89EF79465CA0D3A76" Source="payload/free-gateway/start_hidden.bat" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp6653960B6EC386DDACC0" Guid="30f60204-0a87-3d02-aac2-d734e1d4d09c" Directory="DirGW">
-        <File Id="filF618469974A28BC2B2AF" Source="payload/free-gateway/start_hidden.vbs" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp0F9F43DD85A099EEF867" Guid="9af4a7b2-1496-3bdd-ac52-ffd2870e28f4" Directory="DirGW">
-        <File Id="fil54BBD2CF10E1951987EA" Source="payload/free-gateway/启动免费网关.bat" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpADCC154960129FFF42CB" Guid="1335e996-fde8-3ef1-8ca4-e185f17f336e" Directory="DirGW">
-        <File Id="filBEC0F33BBAEF70139705" Source="payload/free-gateway/启动服务.vbs" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpFA31EEA43042D084F6FC" Guid="51edc5ae-8714-3e9a-8f6d-c02d2f94b05c" Directory="DirGW">
-        <File Id="fil7AD5D00C67682C86EA09" Source="payload/free-gateway/启动模型服务.bat" KeyPath="yes" />
-      </Component>
-      <Component Id="cmpC71DF05AFBDAE861213A" Guid="9fc929c3-7b9e-3d47-afcf-9d5f721d5d7a" Directory="INSTALLFOLDER">
-        <File Id="fil6503AFEC44DD79537AD6" Source="payload/AI模型桥接.exe" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp92FC1CB7AC41FC862C1B" Guid="1577cb30-b117-3147-bba3-a35d04db8177" Directory="INSTALLFOLDER">
-        <File Id="filB8169280883ACA9222F4" Source="payload/setup_runtime.bat" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp5F836B2243DCE0465739" Guid="e57a62d8-31c7-33a6-a716-a96d47f9b2b7" Directory="INSTALLFOLDER">
-        <File Id="fil686B5000BEF0D76B55A5" Source="payload/requirements-bridge.txt" KeyPath="yes" />
-      </Component>
-      <Component Id="cmp26FD799EA07494916E9D" Guid="58e1f9e4-7c36-3d52-8195-4c7a97e0b59c" Directory="INSTALLFOLDER">
-        <File Id="fil9C77326050344D3E1814" Source="payload/README.txt" KeyPath="yes" />
-      </Component>
+      <ComponentRef Id="cmp7BA8EAE4F9C35140" />
+      <ComponentRef Id="cmp23E71B1CC0DC513C" />
+      <ComponentRef Id="cmpBEF48971980C5A59" />
+      <ComponentRef Id="cmp3BB93392534D5881" />
+      <ComponentRef Id="cmpE1A044D2044250A4" />
+      <ComponentRef Id="cmp74A9A8DB0DBB5D90" />
+      <ComponentRef Id="cmp2F660660BFE75FF5" />
+      <ComponentRef Id="cmp0B683EB74E045B1D" />
+      <ComponentRef Id="cmp0B986BE9F6F35351" />
+      <ComponentRef Id="cmpEDC16B803CD050DE" />
+      <ComponentRef Id="cmpD72566D119105B21" />
+      <ComponentRef Id="cmp919C2A323A555AFE" />
+      <ComponentRef Id="cmpE2980A66986C58F1" />
+      <ComponentRef Id="cmpC4617EC85B825A58" />
+      <ComponentRef Id="cmpCBE6E6982CD95DDF" />
+      <ComponentRef Id="cmpED424BAD19865917" />
+      <ComponentRef Id="cmpC3B18D70F8E25052" />
+      <ComponentRef Id="cmpBC8F51AAFC4F55D4" />
+      <ComponentRef Id="cmp30A4D746DB795854" />
+      <ComponentRef Id="cmp2BFFAF1B77935542" />
+      <ComponentRef Id="cmpC50E80206D7453C0" />
+      <ComponentRef Id="cmp23A700D996515356" />
+      <ComponentRef Id="cmpE79FC4FD3AD45063" />
+      <ComponentRef Id="cmpCAB467CE0DC65F30" />
+      <ComponentRef Id="cmp75F7D5E8395E530A" />
+      <ComponentRef Id="cmpC76E8EE94F3F5D65" />
+      <ComponentRef Id="cmp1CE56A7EF8C95B38" />
+      <ComponentRef Id="cmpFBA2F4A0976F5D2E" />
+      <ComponentRef Id="cmpA04658E1C4A35F0C" />
+      <ComponentRef Id="cmpA1E99BA853B25EE8" />
+      <ComponentRef Id="cmp4D9CE92121955AA1" />
+      <ComponentRef Id="cmpCCAE5111541551EC" />
+      <ComponentRef Id="cmp5C5ED9EF82815970" />
+      <ComponentRef Id="cmp4ED905077706584F" />
+      <ComponentRef Id="cmp8DCFCFBBFE815232" />
+      <ComponentRef Id="cmpF7838E4265F55332" />
+      <ComponentRef Id="cmp055789824AB45305" />
+      <ComponentRef Id="cmp93546316D2A35B6E" />
+      <ComponentRef Id="cmpF3D7B28100E55AB5" />
+      <ComponentRef Id="cmpAD5380C2453E5628" />
+      <ComponentRef Id="cmp60B6657EEDBB5980" />
+      <ComponentRef Id="cmp37D462114E625E04" />
+      <ComponentRef Id="cmpCD03EF212CB85C12" />
+      <ComponentRef Id="cmpC7335436F77B5004" />
+      <ComponentRef Id="cmpEFC0BFF42A7E5393" />
+      <ComponentRef Id="cmp35E912435E425BC2" />
+      <ComponentRef Id="cmp259265DC1D225841" />
+      <ComponentRef Id="cmpCBCAC58D607955A5" />
+      <ComponentRef Id="cmp0F12B7D8A2A45445" />
+      <ComponentRef Id="cmpE5542393DCF75D65" />
+      <ComponentRef Id="cmp199FF6FF6B995A88" />
+      <ComponentRef Id="cmpD9540BFFB774596B" />
+      <ComponentRef Id="cmp047E15EA75015EA9" />
+      <ComponentRef Id="cmpF11A8C2726365DC8" />
+      <ComponentRef Id="cmp5165A88995715335" />
+      <ComponentRef Id="cmp5AFA6B570BE15A29" />
+      <ComponentRef Id="cmpB1664E5504FB5D40" />
+      <ComponentRef Id="cmpBD5BA86EF1105139" />
+      <ComponentRef Id="cmp1219FF6E91D2563B" />
+      <ComponentRef Id="cmp836DE834ECCB55FF" />
+      <ComponentRef Id="cmp2A9BD77A628553FB" />
+      <ComponentRef Id="cmpA3DF71FB24635FEE" />
+      <ComponentRef Id="cmp21BF109308E55D21" />
+      <ComponentRef Id="cmp2CDF8148F094569A" />
+      <ComponentRef Id="cmpF74DDF2F4EA152B6" />
+      <ComponentRef Id="cmp92123FED133352AD" />
+      <ComponentRef Id="cmp11A7931EBCE65912" />
+      <ComponentRef Id="cmp438F2EF8A4825E1F" />
+      <ComponentRef Id="cmpAA3EDEB8067652E1" />
+      <ComponentRef Id="cmp4B48291A7628598B" />
+      <ComponentRef Id="cmp034E2A2A7FE95DBC" />
+      <ComponentRef Id="cmpADAE06897DB151CE" />
+      <ComponentRef Id="cmp095EDCAF2A375A18" />
+      <ComponentRef Id="cmp3FCFAC269B925F9E" />
+      <ComponentRef Id="cmpD8A12AE4349D51CD" />
+      <ComponentRef Id="cmpA458EC74764B59D3" />
+      <ComponentRef Id="cmp540B60AA24905200" />
+      <ComponentRef Id="cmp2A5A07DCF70D5D77" />
+      <ComponentRef Id="cmp9238079AF65F56A5" />
+      <ComponentRef Id="cmp5FEEECBEC465555D" />
+      <ComponentRef Id="cmp62819BE0C7315274" />
+      <ComponentRef Id="cmp1E22959649185373" />
+      <ComponentRef Id="cmp0F79B7DD7FC65BBC" />
+      <ComponentRef Id="cmp1B4D4EE1EA765808" />
+      <ComponentRef Id="cmpDA782721C2DD5026" />
+      <ComponentRef Id="cmp9CFBB9F576055D28" />
+      <ComponentRef Id="cmpD6DC3D061CAE569E" />
+      <ComponentRef Id="cmpA15BF36FD59B54EA" />
+      <ComponentRef Id="cmp455E76BEBCE05903" />
     </Feature>
   </Package>
 </Wix>
